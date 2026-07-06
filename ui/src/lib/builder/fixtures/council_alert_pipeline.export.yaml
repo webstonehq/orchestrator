@@ -1,0 +1,55 @@
+id: council_alert_pipeline
+name: council-alert-pipeline
+namespace: default
+description: ''
+inputs:
+- id: provinces
+  type: ARRAY
+  required: true
+  default: '["ON","QC"]'
+variables:
+- id: server
+  value: https://api.example.com
+triggers:
+- id: nightly
+  type: schedule
+  cron: 0 3 * * *
+  timezone: America/Toronto
+  catchup: latest
+  enabled: true
+tasks:
+- id: discover
+  type: http.request
+  retry:
+    type: exponential
+    max_attempts: 3
+    base_seconds: 5
+  timeout_seconds: 60
+  on_error: fail
+  config:
+    body: []
+    headers: []
+    method: GET
+    raw_body: null
+    success_codes: 2xx
+    url: '{{ vars.server }}/api/municipalities'
+  outputs:
+  - name: ids
+    type: ARRAY
+    extract: result.body.ids
+- id: fetch_all
+  type: parallel
+  items: '{{ outputs.discover.ids }}'
+  concurrency: 8
+  tasks:
+  - id: fetch_one
+    type: http.request
+    on_error: continue
+    config:
+      method: GET
+      url: '{{ vars.server }}/api/m/{{ taskrun.value }}'
+    outputs: []
+  outputs:
+  - name: results
+    type: ARRAY
+    extract: result.items

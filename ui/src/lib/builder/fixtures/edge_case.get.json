@@ -1,0 +1,93 @@
+{
+	"current_rev": 1,
+	"definition": {
+		"description": "line one\nline two\n",
+		"inputs": [
+			{
+				"default": "yes",
+				"id": "a",
+				"required": false,
+				"type": "STRING"
+			},
+			{
+				"default": "a: b",
+				"id": "b",
+				"required": false,
+				"type": "STRING"
+			},
+			{
+				"default": "trailing ",
+				"id": "c",
+				"required": false,
+				"type": "STRING"
+			},
+			{
+				"default": "- leading dash",
+				"id": "d",
+				"required": false,
+				"type": "STRING"
+			},
+			{
+				"default": "%percent",
+				"id": "e",
+				"required": false,
+				"type": "STRING"
+			},
+			{
+				"default": "has # hash",
+				"id": "f",
+				"required": false,
+				"type": "STRING"
+			},
+			{
+				"default": "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word ",
+				"id": "g",
+				"required": false,
+				"type": "STRING"
+			},
+			{
+				"default": "no",
+				"id": "h",
+				"required": false,
+				"type": "STRING"
+			},
+			{
+				"default": "0x1F",
+				"id": "i",
+				"required": false,
+				"type": "STRING"
+			},
+			{
+				"default": "1.5e3",
+				"id": "j",
+				"required": false,
+				"type": "STRING"
+			},
+			{
+				"default": "nullish:value",
+				"id": "k",
+				"required": false,
+				"type": "STRING"
+			},
+			{
+				"default": "averyverylongtokenwithoutspaces_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+				"id": "l",
+				"required": false,
+				"type": "STRING"
+			}
+		],
+		"name": "edge-case",
+		"namespace": "default",
+		"tasks": [],
+		"triggers": [],
+		"variables": [
+			{
+				"id": "raw",
+				"value": "{\n  \"key\": \"value\"\n}"
+			}
+		]
+	},
+	"id": "edge_case",
+	"paused": false,
+	"updated_at": "2026-07-06T07:25:25.769Z"
+}

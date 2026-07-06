@@ -1,0 +1,63 @@
+id: edge_case
+name: edge-case
+namespace: default
+description: |
+  line one
+  line two
+inputs:
+- id: a
+  type: STRING
+  required: false
+  default: yes
+- id: b
+  type: STRING
+  required: false
+  default: 'a: b'
+- id: c
+  type: STRING
+  required: false
+  default: 'trailing '
+- id: d
+  type: STRING
+  required: false
+  default: '- leading dash'
+- id: e
+  type: STRING
+  required: false
+  default: '%percent'
+- id: f
+  type: STRING
+  required: false
+  default: 'has # hash'
+- id: g
+  type: STRING
+  required: false
+  default: 'word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word '
+- id: h
+  type: STRING
+  required: false
+  default: no
+- id: i
+  type: STRING
+  required: false
+  default: '0x1F'
+- id: j
+  type: STRING
+  required: false
+  default: '1.5e3'
+- id: k
+  type: STRING
+  required: false
+  default: nullish:value
+- id: l
+  type: STRING
+  required: false
+  default: averyverylongtokenwithoutspaces_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+variables:
+- id: raw
+  value: |-
+    {
+      "key": "value"
+    }
+triggers: []
+tasks: []

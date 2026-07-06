@@ -1,0 +1,88 @@
+{
+	"current_rev": 1,
+	"definition": {
+		"description": "",
+		"inputs": [
+			{
+				"default": "[\"ON\",\"QC\"]",
+				"id": "provinces",
+				"required": true,
+				"type": "ARRAY"
+			}
+		],
+		"name": "council-alert-pipeline",
+		"namespace": "default",
+		"tasks": [
+			{
+				"config": {
+					"body": [],
+					"headers": [],
+					"method": "GET",
+					"raw_body": null,
+					"success_codes": "2xx",
+					"url": "{{ vars.server }}/api/municipalities"
+				},
+				"id": "discover",
+				"on_error": "fail",
+				"outputs": [
+					{
+						"extract": "result.body.ids",
+						"name": "ids",
+						"type": "ARRAY"
+					}
+				],
+				"retry": {
+					"base_seconds": 5,
+					"max_attempts": 3,
+					"type": "exponential"
+				},
+				"timeout_seconds": 60,
+				"type": "http.request"
+			},
+			{
+				"concurrency": 8,
+				"id": "fetch_all",
+				"items": "{{ outputs.discover.ids }}",
+				"outputs": [
+					{
+						"extract": "result.items",
+						"name": "results",
+						"type": "ARRAY"
+					}
+				],
+				"tasks": [
+					{
+						"config": {
+							"method": "GET",
+							"url": "{{ vars.server }}/api/m/{{ taskrun.value }}"
+						},
+						"id": "fetch_one",
+						"on_error": "continue",
+						"outputs": [],
+						"type": "http.request"
+					}
+				],
+				"type": "parallel"
+			}
+		],
+		"triggers": [
+			{
+				"catchup": "latest",
+				"cron": "0 3 * * *",
+				"enabled": true,
+				"id": "nightly",
+				"timezone": "America/Toronto",
+				"type": "schedule"
+			}
+		],
+		"variables": [
+			{
+				"id": "server",
+				"value": "https://api.example.com"
+			}
+		]
+	},
+	"id": "council_alert_pipeline",
+	"paused": false,
+	"updated_at": "2026-07-06T07:12:49.137Z"
+}

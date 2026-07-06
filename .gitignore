@@ -1,0 +1,6 @@
+/target
+/.dev
+ui/node_modules
+ui/build
+ui/.svelte-kit
+.DS_Store

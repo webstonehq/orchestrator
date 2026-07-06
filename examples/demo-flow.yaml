@@ -1,0 +1,79 @@
+id: demo_civic_minutes
+name: demo-civic-minutes
+namespace: default
+description: >-
+  Demo flow: fetch a list of municipalities from a local mock API, fan out
+  over the ids (a few return 404 and are dropped), then POST an aggregate
+  report. Run it with scripts/demo.sh, which starts the mock API on
+  127.0.0.1:4599.
+inputs:
+- id: regions
+  type: ARRAY
+  required: false
+  default: '["ON","QC","BC"]'
+- id: dry_run
+  type: BOOLEAN
+  required: false
+  default: 'false'
+variables:
+- id: server
+  value: http://127.0.0.1:4599
+triggers:
+- id: every_five_minutes
+  type: schedule
+  cron: '*/5 * * * *'
+  timezone: UTC
+  catchup: none
+  enabled: false
+tasks:
+- id: discover
+  type: http.request
+  on_error: fail
+  config:
+    method: GET
+    url: '{{ vars.server }}/municipalities'
+    headers: []
+    body: []
+    raw_body: null
+    success_codes: 2xx
+  outputs:
+  - name: ids
+    type: ARRAY
+    extract: result.body.ids
+- id: fetch_all
+  type: parallel
+  items: '{{ outputs.discover.ids }}'
+  concurrency: 4
+  tasks:
+  - id: fetch_one
+    type: http.request
+    on_error: continue
+    config:
+      method: GET
+      url: '{{ vars.server }}/municipality/{{ taskrun.value }}'
+    outputs: []
+  outputs:
+  - name: results
+    type: ARRAY
+    extract: result.items
+- id: report
+  type: http.request
+  retry:
+    type: exponential
+    max_attempts: 3
+    base_seconds: 2
+  on_error: fail
+  config:
+    method: POST
+    url: '{{ vars.server }}/report'
+    body:
+    - key: regions
+      value: '{{ inputs.regions }}'
+    - key: dry_run
+      value: '{{ inputs.dry_run }}'
+    - key: results
+      value: '{{ outputs.fetch_all.results }}'
+  outputs:
+  - name: ok
+    type: BOOLEAN
+    extract: result.body.ok

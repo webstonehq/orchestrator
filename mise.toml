@@ -1,0 +1,67 @@
+[tools]
+rust = "latest"
+# node/npm for the UI (Vite) — provided by mise so `mise run dev` works without
+# relying on a node install from the surrounding shell.
+node = "22"
+# File-watcher used by the dev tasks to rebuild+restart the backend on change.
+watchexec = "latest"
+
+# ---------------------------------------------------------------------------
+# Local development
+#
+#   mise run dev        UI hot-reload + backend auto-restart together
+#   mise run dev-ui     UI only (Vite HMR on :5173)
+#   mise run dev-api    backend only (:4400, rebuild+restart on Rust changes)
+#   mise run dev-worker BYOW worker against the local server (run alongside `dev`)
+#
+# Open http://localhost:5173 — the Vite dev server hot-reloads the UI in place
+# and proxies /api to the backend on :4400. UI edits apply instantly (HMR);
+# Rust is compiled, so backend edits trigger an incremental recompile and a
+# server restart (a few seconds) — the closest thing to HMR the backend can do.
+# Dev state lives in ./.dev (gitignored), never ~/.orchestrator.
+#
+# `dev-worker` needs a server that accepts the worker token, so run it next to
+# `dev` (which serves with `--worker-token s3cret`), not `dev-api` (no token).
+# It serves the `gpu`/`test` queues: give a flow `queue: gpu` (or `test`) and it
+# executes on the worker instead of the server. Visible under Workers in the UI.
+# ---------------------------------------------------------------------------
+
+[tasks.dev]
+description = "Local dev: UI hot-reload + backend auto-restart (open http://localhost:5173)"
+env = { RUST_LOG = "info,orchestrator=debug" }
+run = """
+mkdir -p .dev
+trap 'kill 0' EXIT
+watchexec --restart --stop-signal SIGINT --watch src --watch Cargo.toml --exts rs,toml -- \
+  cargo run -- serve --db .dev/dev.db --key .dev/dev.key --worker-token s3cret &
+(cd ui && npm install && npm run dev) &
+wait
+"""
+
+[tasks.dev-api]
+description = "Backend only on :4400 — recompiles + restarts on Rust source changes"
+env = { RUST_LOG = "info,orchestrator=debug" }
+run = """
+mkdir -p .dev
+watchexec --restart --stop-signal SIGINT --watch src --watch Cargo.toml --exts rs,toml -- \
+  cargo run -- serve --db .dev/dev.db --key .dev/dev.key
+"""
+
+[tasks.dev-ui]
+description = "UI only — Vite HMR on http://localhost:5173 (proxies /api to :4400)"
+dir = "ui"
+run = "npm install && npm run dev"
+
+[tasks.dev-worker]
+description = "BYOW worker connected to the local dev server (serves the gpu/test queues)"
+env = { RUST_LOG = "info,orchestrator=debug" }
+run = """
+mkdir -p .dev
+watchexec --restart --stop-signal SIGINT --watch src --watch Cargo.toml --exts rs,toml -- \
+  cargo run -- worker \
+    --server http://localhost:4400 \
+    --token s3cret \
+    --id dev-worker \
+    --queues gpu,test \
+    --db .dev/worker.db --key .dev/worker.key
+"""
