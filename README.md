@@ -29,6 +29,7 @@ lives in a single SQLite file.
 ## Contents
 
 - [Quickstart](#quickstart)
+- [Run with Docker](#run-with-docker)
 - [Flow YAML reference](#flow-yaml-reference)
 - [Writing a plugin](#writing-a-plugin)
 - [Configuration](#configuration)
@@ -77,6 +78,48 @@ dropped mid-run — then POSTs an aggregate report. Open the run to watch the
 execution graph, fan-out counters, and logs stream in live:
 
 ![A run in progress: the execution graph with a fan-out progress bar on the left, streaming logs on the right](docs/screenshots/run-view.png)
+
+## Run with Docker
+
+A prebuilt multi-arch image (`linux/amd64` + `linux/arm64`) is published to the
+GitHub Container Registry on every push to `main` (`:latest`) and every version
+tag (`:X.Y.Z`). No local Rust or Node toolchain required:
+
+```sh
+docker run --rm -p 4400:4400 -v orchestrator-data:/data \
+  ghcr.io/webstonehq/orchestrator:latest
+```
+
+Open http://127.0.0.1:4400. The `http.request` plugin bundle ships inside the
+image, so flows work out of the box.
+
+- **State** — the SQLite database and encrypted `master.key` live under `/data`
+  (the container's `HOME`). Mount a volume there (as above) to persist flows,
+  runs, and secrets across restarts; the master key is generated on first run,
+  so keep the volume to keep your secrets decryptable.
+- **Listen address** — the image runs `serve --listen 0.0.0.0:4400` so the UI is
+  reachable from outside the container. Orchestrator has **no built-in auth**
+  (see [Security notes](#security-notes)) — only expose it behind an
+  authenticating reverse proxy or on a trusted network.
+- **Other subcommands** — the binary is the entrypoint, so override the default
+  command to run a worker or manage secrets, e.g.
+  `docker run ... ghcr.io/webstonehq/orchestrator:latest worker --server … --token …`.
+
+### Deploy to Railway (or similar)
+
+Point the platform at the published image
+`ghcr.io/webstonehq/orchestrator:latest`, expose port `4400`, and attach a
+persistent volume mounted at `/data`. That's enough to boot; put an
+authenticating proxy in front before exposing it publicly.
+
+Building the image yourself instead:
+
+```sh
+docker build -t orchestrator .
+```
+
+The build compiles the UI, server, and plugin bundles in one multi-stage
+`Dockerfile` — no host toolchain needed beyond Docker.
 
 ## Flow YAML reference
 
