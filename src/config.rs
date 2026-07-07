@@ -22,14 +22,22 @@ impl Config {
     /// Resolve CLI flags into a full config, filling in defaults under
     /// `~/.orchestrator` (created with 0700 permissions if missing).
     ///
+    /// A missing `--listen` resolves via [`default_listen`]: `0.0.0.0:$PORT`
+    /// when `PORT` is set (Railway/Render/Fly), otherwise `127.0.0.1:4400`.
+    ///
     /// Worker tokens come from `--worker-token` (repeatable) plus the
     /// comma-separated `ORCH_WORKER_TOKENS` env var, deduplicated.
     pub fn resolve(
-        listen: SocketAddr,
+        listen: Option<SocketAddr>,
         db: Option<PathBuf>,
         key: Option<PathBuf>,
         mut worker_tokens: Vec<String>,
     ) -> io::Result<Self> {
+        let listen = match listen {
+            Some(addr) => addr,
+            None => default_listen(std::env::var("PORT").ok().as_deref())?,
+        };
+
         if let Ok(env) = std::env::var("ORCH_WORKER_TOKENS") {
             worker_tokens.extend(
                 env.split(',')
@@ -60,6 +68,28 @@ impl Config {
     }
 }
 
+/// Default listen address when `--listen` is omitted.
+///
+/// A set `PORT` (the convention on Railway, Render, Fly, Heroku, …) means the
+/// process runs behind a platform router and must bind every interface, so we
+/// listen on `0.0.0.0:$PORT`. With no `PORT`, we keep the conservative local
+/// default of `127.0.0.1:4400` (loopback only). `port` is the raw env value,
+/// passed in so this stays a pure, testable function.
+fn default_listen(port: Option<&str>) -> io::Result<SocketAddr> {
+    match port.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => {
+            let port: u16 = p.parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid PORT value {p:?} (expected 0-65535)"),
+                )
+            })?;
+            Ok(SocketAddr::from(([0, 0, 0, 0], port)))
+        }
+        None => Ok(SocketAddr::from(([127, 0, 0, 1], 4400))),
+    }
+}
+
 /// `~/.orchestrator`, created with 0700 permissions if missing.
 pub fn default_dir() -> io::Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| {
@@ -82,4 +112,36 @@ pub fn default_dir() -> io::Result<PathBuf> {
     std::fs::create_dir_all(&dir)?;
 
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_port_defaults_to_loopback_4400() {
+        let addr = default_listen(None).unwrap();
+        assert_eq!(addr, "127.0.0.1:4400".parse().unwrap());
+    }
+
+    #[test]
+    fn set_port_binds_all_interfaces() {
+        let addr = default_listen(Some("8080")).unwrap();
+        assert_eq!(addr, "0.0.0.0:8080".parse().unwrap());
+    }
+
+    #[test]
+    fn whitespace_and_empty_port_fall_back_to_default() {
+        // A router that exports PORT="" (or padded) should not error; treat it
+        // as unset rather than a parse failure.
+        assert_eq!(default_listen(Some("")).unwrap(), default_listen(None).unwrap());
+        assert_eq!(default_listen(Some("  ")).unwrap(), default_listen(None).unwrap());
+        assert_eq!(default_listen(Some(" 3000 ")).unwrap(), "0.0.0.0:3000".parse().unwrap());
+    }
+
+    #[test]
+    fn non_numeric_port_is_an_error() {
+        assert!(default_listen(Some("abc")).is_err());
+        assert!(default_listen(Some("70000")).is_err()); // out of u16 range
+    }
 }

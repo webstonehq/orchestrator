@@ -87,12 +87,18 @@ COPY --from=build /out/orchestrator /app/orchestrator
 COPY --from=build /out/plugins /app/plugins
 
 ENV HOME=/data
+# The server binds 0.0.0.0:$PORT (see config::default_listen), so it is
+# reachable from outside the container and honors the PORT a platform router
+# injects (Railway/Render/Fly). Defaulted here so a plain `docker run` still
+# lands on 4400; override with -e PORT=… or `serve --listen …`.
+ENV PORT=4400
 USER app
 VOLUME ["/data"]
 EXPOSE 4400
 
-# Bind 0.0.0.0 so the server is reachable from outside the container. NOTE:
-# Orchestrator has no built-in auth — only expose it behind an authenticating
-# reverse proxy or on a trusted network (see the README security notes).
+# NOTE: Orchestrator has no built-in auth — only expose it behind an
+# authenticating reverse proxy or on a trusted network (see README security
+# notes). The binary is the entrypoint, so `docker run … <image> worker …`
+# overrides the default `serve`.
 ENTRYPOINT ["/app/orchestrator"]
-CMD ["serve", "--listen", "0.0.0.0:4400"]
+CMD ["serve"]

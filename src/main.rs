@@ -36,9 +36,10 @@ struct Cli {
 enum Command {
     /// Serve the web UI, JSON API, scheduler, and executor.
     Serve {
-        /// Address to listen on.
-        #[arg(long, default_value = "127.0.0.1:4400")]
-        listen: SocketAddr,
+        /// Address to listen on. Defaults to `0.0.0.0:$PORT` when the `PORT`
+        /// env var is set (Railway/Render/Fly), otherwise `127.0.0.1:4400`.
+        #[arg(long)]
+        listen: Option<SocketAddr>,
 
         /// Path to the SQLite database file [default: ~/.orchestrator/orchestrator.db].
         #[arg(long, value_name = "PATH")]
@@ -190,7 +191,7 @@ fn default_plugins_dir() -> PathBuf {
 }
 
 async fn serve(
-    listen: SocketAddr,
+    listen: Option<SocketAddr>,
     db: Option<PathBuf>,
     key: Option<PathBuf>,
     worker_tokens: Vec<String>,
