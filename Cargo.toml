@@ -10,6 +10,7 @@ description = "Single-binary workflow orchestration tool: web UI, JSON API, cron
 license = "MIT"
 
 [dependencies]
+argon2 = "0.5"
 async-trait = "0.1"
 axum = "0.8"
 chacha20poly1305 = "0.11"
@@ -19,6 +20,7 @@ clap = { version = "4", features = ["derive", "env"] }
 croner = "3"
 dirs = "6"
 futures = "0.3"
+getrandom = "0.2"
 plugin-sdk = { path = "plugins/sdk" }
 r2d2 = "0.8"
 r2d2_sqlite = "0.34"

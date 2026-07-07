@@ -22,6 +22,7 @@ lives in a single SQLite file.
 - Every save is a revision; restore any revision
 - Encrypted secrets (ChaCha20-Poly1305, key on disk, values redacted from logs and results)
 - Single-binary deploy — the UI is one embedded HTML file
+- Username/password login with a first-run setup screen, so a public URL is safe to expose
 - Live run view via SSE: statuses, fan-out counters, and logs stream in
 - Bring your own worker (BYOW): route flows to remote workers by queue, keeping
   the server as control plane while execution runs on your own machines
@@ -34,6 +35,7 @@ lives in a single SQLite file.
 - [Writing a plugin](#writing-a-plugin)
 - [Configuration](#configuration)
 - [Bring your own worker (BYOW)](#bring-your-own-worker-byow)
+- [Authentication](#authentication)
 - [Security notes](#security-notes)
 - [Development](#development)
 - [Known limitations (v1)](#known-limitations-v1)
@@ -58,8 +60,10 @@ cp target/release/orchestrator-plugin-http target/release/plugins/http/
 ./target/release/orchestrator serve
 ```
 
-Open http://127.0.0.1:4400 to reach the workspace — flows, their schedules,
-and recent activity at a glance.
+Open http://127.0.0.1:4400. On first launch you'll be prompted to create an
+admin account (one-time setup — see [Authentication](#authentication)); after
+that you reach the workspace — flows, their schedules, and recent activity at a
+glance.
 
 ![The workspace: a flows table with success rate, last run, and average duration, above summary stat tiles](docs/screenshots/dashboard.png)
 
@@ -72,6 +76,11 @@ above) — the script waits briefly for it at `ORCH_URL` (default
 ```sh
 ./scripts/demo.sh
 ```
+
+Since the API requires a login, the script signs in over it: on a fresh server
+it creates the admin (`demo` / `demo-password`) via first-run setup, otherwise
+it signs in — override with `ORCH_USER`/`ORCH_PASSWORD` for a configured
+instance.
 
 The demo flow fans out over a list of municipalities — a few ids 404 and are
 dropped mid-run — then POSTs an aggregate report. Open the run to watch the
@@ -100,9 +109,8 @@ image, so flows work out of the box.
 - **Listen address** — the image binds `0.0.0.0:$PORT` (`PORT` defaults to
   `4400`), so the UI is reachable from outside the container and drops onto
   whatever port a platform router injects. Override with `-e PORT=…` or
-  `serve --listen …`. Orchestrator has **no built-in auth** (see
-  [Security notes](#security-notes)) — only expose it behind an authenticating
-  reverse proxy or on a trusted network.
+  `serve --listen …`. The UI and API are gated by a login; the first visit
+  prompts you to create the admin account (see [Authentication](#authentication)).
 - **Other subcommands** — the binary is the entrypoint, so override the default
   command to run a worker or manage secrets, e.g.
   `docker run ... ghcr.io/webstonehq/orchestrator:latest worker --server … --token …`.
@@ -114,8 +122,9 @@ image, so flows work out of the box.
 Point the platform at the published image
 `ghcr.io/webstonehq/orchestrator:latest`, attach a persistent volume mounted at
 `/data`, and let it bind `$PORT` (the image reads it, defaulting to `4400`).
-That's enough to boot; put an authenticating proxy in front before exposing it
-publicly.
+On first load the app prompts you to create an admin account (see
+[Authentication](#authentication)) — do it immediately, since until then anyone
+with the URL could claim it.
 
 For **Railway** specifically — including the one-click template, the
 `RAILWAY_RUN_UID=0` setting needed so the non-root image can write the volume,
@@ -515,6 +524,9 @@ orchestrator serve [--listen ADDR] [--db PATH] [--key PATH] [--worker-token TOKE
 verbosity is controlled with the standard `RUST_LOG` env var (default
 `info`), e.g. `RUST_LOG=debug orchestrator serve`.
 
+The admin account is created through the UI on first run — no credential env
+vars (see [Authentication](#authentication)).
+
 ## Bring your own worker (BYOW)
 
 By default the server executes flows itself. To run execution on your own
@@ -568,13 +580,33 @@ plugin bundles this worker can execute; default `plugins/` beside the binary).
 Populate the secret store with `orchestrator secrets set NAME` (and `list` /
 `delete`) — it targets `--db`/`--key`, defaulting to the same worker paths.
 
+## Authentication
+
+The UI and JSON API sit behind a username/password login, so a public
+deployment is safe for a single operator.
+
+- **First-run setup.** A fresh database has no accounts, so the first visit
+  serves a one-time onboarding screen that creates the admin account. As soon as
+  that account exists the setup screen closes (`POST /api/auth/setup` then
+  returns `409`), and every later visit gets the normal login. **Complete setup
+  immediately after deploying a public URL** — until you do, whoever loads it
+  first can claim the admin account.
+- **Sessions** are server-side (a random token in SQLite) delivered as an
+  `HttpOnly`, `SameSite=Lax` cookie, marked `Secure` automatically when the
+  request arrives over HTTPS (e.g. behind Railway's TLS proxy). Logging out
+  deletes the session; sessions otherwise expire after 30 days. Passwords are
+  stored as argon2id hashes.
+- **No password reset.** There is no in-app password change or recovery: if you
+  lose the password, clear the account and re-run setup — either delete the
+  `users` row from the SQLite database, e.g.
+  `sqlite3 ~/.orchestrator/orchestrator.db 'DELETE FROM users;'` (also clears
+  sessions via cascade), or start against a fresh `--db`. The next load shows
+  onboarding again.
+- The worker control-plane API (`/api/worker/*`) keeps its own bearer-token auth
+  (`--worker-token`); it is independent of the human login.
+
 ## Security notes
 
-- **No authentication.** Orchestrator binds `127.0.0.1` by default. Passing
-  `--listen` with a non-loopback address exposes the full UI and API —
-  including secrets management and arbitrary outbound HTTP — **without any
-  auth**. Only expose it behind a reverse proxy that adds authentication, or
-  on a trusted network.
 - Secret values are encrypted at rest and redacted from logs and stored task
   results, and the API never returns them (`GET /api/secrets` lists names and
   timestamps only). Protect `master.key` — with it, the database's secrets
@@ -623,7 +655,9 @@ compiling with `--release`.
 - YAML import: duplicate mapping keys are last-wins, not rejected.
 - The HTTP plugin buffers response bodies fully (no size cap), and
   multi-value response headers are comma-joined (lossy for `Set-Cookie`).
-- No auth, no multi-user (see Security notes).
+- Single-user auth only: one admin created via first-run setup, with no in-app
+  user management, password change, or reset (see
+  [Authentication](#authentication)).
 - Single process, single node: the scheduler and executor run in-process;
   runs active during an unclean shutdown are marked failed ("interrupted") on
   the next startup.

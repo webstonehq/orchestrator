@@ -44,6 +44,14 @@ fn new_env() -> Env {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("orchestrator.db");
     let db = Db::open(&db_path).expect("open db");
+    // Seed an authenticated session so the guarded data API is reachable; every
+    // request in this suite carries `Cookie: orch_session=test-session`.
+    let uid = db
+        .create_first_user("tester", "unused-hash")
+        .expect("seed user")
+        .expect("empty users table");
+    db.create_session("test-session", uid, 86_400)
+        .expect("seed session");
     let pool = r2d2::Pool::builder()
         .max_size(2)
         .build(r2d2_sqlite::SqliteConnectionManager::file(&db_path))
@@ -79,6 +87,7 @@ async fn request(env: &Env, method: &str, uri: &str) -> (StatusCode, Value) {
     let req = Request::builder()
         .method(method)
         .uri(uri)
+        .header("cookie", "orch_session=test-session")
         .body(Body::empty())
         .expect("build request");
     let res = env.app.clone().oneshot(req).await.expect("oneshot");
@@ -759,7 +768,12 @@ async fn serve(env: &Env) -> SocketAddr {
 /// Returns `(event_name, data)` pairs; comment/keep-alive lines are ignored.
 async fn read_sse_frames(url: &str, max: Duration) -> Vec<(String, String)> {
     let deadline = tokio::time::Instant::now() + max;
-    let mut resp = reqwest::get(url).await.expect("connect SSE");
+    let mut resp = reqwest::Client::new()
+        .get(url)
+        .header("cookie", "orch_session=test-session")
+        .send()
+        .await
+        .expect("connect SSE");
     assert_eq!(resp.status(), 200);
     assert!(
         resp.headers()["content-type"]
@@ -900,8 +914,12 @@ async fn sse_finished_run_sends_snapshot_then_end() {
     assert!(snap["last_log_id"].as_i64().unwrap() > 0);
     assert_eq!(frames[1].0, "end");
 
-    // Unknown run -> 404 before any stream starts.
-    let resp = reqwest::get(format!("http://{addr}/api/runs/999999/events"))
+    // Unknown run -> 404 before any stream starts (authenticated; an anonymous
+    // request would be 401'd by the session guard first).
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/api/runs/999999/events"))
+        .header("cookie", "orch_session=test-session")
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);

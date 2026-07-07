@@ -214,6 +214,13 @@ async fn serve(
     // Database (opens/creates the file and applies migrations).
     let db = Db::open(&config.db_path)?;
 
+    // No admin account is provisioned here: a fresh database has no users, so
+    // the UI serves a one-time onboarding screen that creates the first admin
+    // (POST /api/auth/setup). Once any user exists, setup is closed.
+    if !db.has_users()? {
+        tracing::info!("no users yet — first visitor will be prompted to create an admin account");
+    }
+
     // Secrets store. `Db` does not expose its r2d2 pool (only single
     // connections), so the store gets its own small pool on the same file
     // with the same pragmas; WAL + busy_timeout make cross-pool access safe.

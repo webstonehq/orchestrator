@@ -284,9 +284,23 @@ export interface WorkersResponse {
 	workers: WorkerView[];
 }
 
+export interface AuthUser {
+	username: string;
+}
+
 // ---------------------------------------------------------------------------
 // Client core
 // ---------------------------------------------------------------------------
+
+/**
+ * Fired whenever any API call returns 401 (session missing or expired), so the
+ * app can drop back to the login view from anywhere. Registered by the root
+ * layout; `null` disables it.
+ */
+let onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: (() => void) | null) {
+	onUnauthorized = fn;
+}
 
 export class ApiError extends Error {
 	status: number;
@@ -363,6 +377,7 @@ async function request<T>(method: string, path: string, opts: RequestOptions = {
 
 	const res = await fetch(path, { method, headers, body });
 	if (!res.ok) {
+		if (res.status === 401) onUnauthorized?.();
 		const { message, errors } = await extractError(res);
 		throw new ApiError(res.status, message, errors);
 	}
@@ -399,6 +414,16 @@ export const api = {
 	health: () => get<{ ok: boolean }>('/api/health'),
 	plugins: () => get<PluginManifest[]>('/api/plugins'),
 	dashboard: () => get<Dashboard>('/api/dashboard'),
+
+	auth: {
+		me: () => get<AuthUser>('/api/auth/me'),
+		login: (username: string, password: string) =>
+			post<AuthUser>('/api/auth/login', { username, password }),
+		logout: () => post<{ ok: boolean }>('/api/auth/logout'),
+		setupNeeded: () => get<{ needed: boolean }>('/api/auth/setup'),
+		setup: (username: string, password: string) =>
+			post<AuthUser>('/api/auth/setup', { username, password })
+	},
 
 	flows: {
 		list: () => get<FlowSummary[]>('/api/flows'),

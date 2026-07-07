@@ -7,6 +7,7 @@
 //! Errors use [`ApiError`]: every failure serializes as `{"error": "..."}`
 //! with an appropriate status code, matching the UI client's expectations.
 
+pub mod auth;
 pub mod flows;
 pub mod misc;
 pub mod runs;
@@ -15,7 +16,9 @@ pub mod worker;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::{Request, State};
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 
 use crate::db::Db;
@@ -38,16 +41,38 @@ pub struct AppState {
 }
 
 /// The full `/api` router. The UI router is merged separately in `main`.
+///
+/// Human data endpoints (flows/misc/runs) sit behind [`require_session`]; the
+/// auth endpoints are the public login surface, and the worker API keeps its
+/// own bearer-token auth. `/api/health` is registered in `main`, outside this
+/// router.
 pub fn router(state: AppState) -> Router {
-    Router::new().nest(
-        "/api",
-        Router::new()
-            .merge(flows::router())
-            .merge(misc::router())
-            .merge(runs::router())
-            .merge(worker::router())
-            .with_state(state),
-    )
+    let guarded = Router::new()
+        .merge(flows::router())
+        .merge(misc::router())
+        .merge(runs::router())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_session,
+        ));
+
+    let open = Router::new().merge(auth::router()).merge(worker::router());
+
+    Router::new().nest("/api", guarded.merge(open).with_state(state))
+}
+
+/// Require a valid human session cookie. Applied only to the human data routers
+/// via `route_layer`; the worker API and `/api/auth/*` are exempt.
+async fn require_session(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let authed = match auth::read_session_cookie(req.headers()) {
+        Some(token) => matches!(state.db.session_username(&token), Ok(Some(_))),
+        None => false,
+    };
+    if authed {
+        next.run(req).await
+    } else {
+        ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+    }
 }
 
 /// API error: status code + human message, serialized as `{"error": msg}`.

@@ -44,6 +44,14 @@ fn new_env() -> Env {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("orchestrator.db");
     let db = Db::open(&db_path).expect("open db");
+    // Seed an authenticated session so the guarded data API is reachable; every
+    // request in this suite carries `Cookie: orch_session=test-session`.
+    let uid = db
+        .create_first_user("tester", "unused-hash")
+        .expect("seed user")
+        .expect("empty users table");
+    db.create_session("test-session", uid, 86_400)
+        .expect("seed session");
     let pool = r2d2::Pool::builder()
         .max_size(2)
         .build(r2d2_sqlite::SqliteConnectionManager::file(&db_path))
@@ -75,7 +83,10 @@ async fn raw(
     content_type: Option<&str>,
     body: Option<String>,
 ) -> (StatusCode, HeaderMap, String) {
-    let mut builder = Request::builder().method(method).uri(uri);
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::COOKIE, "orch_session=test-session");
     if let Some(ct) = content_type {
         builder = builder.header(header::CONTENT_TYPE, ct);
     }

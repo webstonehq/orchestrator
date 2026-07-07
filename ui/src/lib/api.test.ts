@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api, ApiError, isParallel } from './api';
+import { api, ApiError, isParallel, setUnauthorizedHandler } from './api';
 import type { ItemStatus, ParallelTaskSpec, RegularTaskSpec, TaskSpec, TaskStatus } from './api';
 import type { Status } from './status';
 
@@ -155,6 +155,50 @@ describe('api error handling', () => {
 		await expect(api.plugins()).rejects.toMatchObject({
 			status: 500,
 			message: 'HTTP 500'
+		});
+	});
+});
+
+describe('auth', () => {
+	it('login posts credentials and returns the user', async () => {
+		const mock = stubFetch(JSON.stringify({ username: 'mike' }));
+		const user = await api.auth.login('mike', 'pw');
+		expect(user.username).toBe('mike');
+		expect(mock).toHaveBeenCalledWith('/api/auth/login', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ username: 'mike', password: 'pw' })
+		});
+	});
+
+	it('me returns the current user', async () => {
+		stubFetch(JSON.stringify({ username: 'mike' }));
+		const user = await api.auth.me();
+		expect(user.username).toBe('mike');
+	});
+
+	it('invokes the unauthorized handler on any 401', async () => {
+		stubFetch(JSON.stringify({ error: 'unauthorized' }), { status: 401 });
+		const onUnauthorized = vi.fn();
+		setUnauthorizedHandler(onUnauthorized);
+		await expect(api.flows.list()).rejects.toMatchObject({ status: 401 });
+		expect(onUnauthorized).toHaveBeenCalledTimes(1);
+		setUnauthorizedHandler(null);
+	});
+
+	it('setupNeeded reports whether onboarding is available', async () => {
+		stubFetch(JSON.stringify({ needed: true }));
+		expect(await api.auth.setupNeeded()).toEqual({ needed: true });
+	});
+
+	it('setup posts the new admin credentials', async () => {
+		const mock = stubFetch(JSON.stringify({ username: 'mike' }));
+		const user = await api.auth.setup('mike', 'correct horse');
+		expect(user.username).toBe('mike');
+		expect(mock).toHaveBeenCalledWith('/api/auth/setup', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ username: 'mike', password: 'correct horse' })
 		});
 	});
 });

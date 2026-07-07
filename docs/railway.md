@@ -5,12 +5,13 @@ Orchestrator ships as a prebuilt multi-arch image
 image plus a persistent volume. This page covers the one-click template, how to
 build the template yourself, and the two settings that are easy to miss.
 
-> ⚠️ **Orchestrator has no built-in authentication.** A Railway service with a
-> public domain is reachable by anyone who has the URL — and that means full
-> control of your flows, runs, and decrypted secrets. Do not put real secrets in
-> a publicly exposed instance. Gate it behind Railway's access controls, an
-> authenticating proxy, or private networking first. See the README
-> [Security notes](../README.md#security-notes).
+> ⚠️ **Claim the admin account the moment the domain is live.** Orchestrator
+> gates the UI and API behind a username/password login, and a fresh deploy has
+> no account yet: the first visit shows a one-time setup screen that creates the
+> admin. Open the URL and complete setup immediately — until you do, anyone with
+> the link can claim it, and a public instance grants full control of your flows,
+> runs, and decrypted secrets. See the README
+> [Authentication](../README.md#authentication).
 
 ## One-click deploy
 
@@ -47,8 +48,9 @@ The same steps double as the recipe for building the template in the composer.
 5. **Settings → Networking → Generate Domain.** Railway detects the port from
    the `PORT` it injects (the app honors it). No manual target port needed.
 6. **Settings → Deploy → Healthcheck Path → `/api/health`.**
-7. **Deploy**, then open the generated domain. The `http.request` plugin ships
-   inside the image, so flows run out of the box.
+7. **Deploy**, then open the generated domain and **complete the one-time setup
+   screen** to create your admin account (do this right away). The `http.request`
+   plugin ships inside the image, so flows run out of the box.
 
 Optional variables:
 

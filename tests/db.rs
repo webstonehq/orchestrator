@@ -897,3 +897,70 @@ fn bump_seq_accepts_increasing_rejects_stale() {
     assert!(!db.bump_seq(id, 1).unwrap(), "stale seq rejected");
     assert!(db.bump_seq(id, 5).unwrap(), "gap forward accepted");
 }
+
+// ---------------------------------------------------------------------------
+// Auth: users & sessions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_first_user_only_succeeds_while_empty() {
+    let (_dir, db) = open_temp();
+    assert!(!db.has_users().unwrap());
+
+    let id = db.create_first_user("mike", "hash1").unwrap();
+    assert!(id.is_some(), "first user is created");
+    assert!(db.has_users().unwrap());
+    assert_eq!(db.get_user_id("mike").unwrap(), id);
+    assert_eq!(db.get_user_hash("mike").unwrap().as_deref(), Some("hash1"));
+
+    // Setup is closed once a user exists: a second attempt is a no-op and does
+    // NOT overwrite the existing admin's credentials.
+    assert_eq!(db.create_first_user("intruder", "hash2").unwrap(), None);
+    assert_eq!(db.get_user_id("intruder").unwrap(), None);
+    assert_eq!(db.get_user_hash("mike").unwrap().as_deref(), Some("hash1"));
+}
+
+#[test]
+fn get_user_id_and_hash_are_none_for_unknown() {
+    let (_dir, db) = open_temp();
+    assert_eq!(db.get_user_id("nobody").unwrap(), None);
+    assert_eq!(db.get_user_hash("nobody").unwrap(), None);
+}
+
+#[test]
+fn session_create_lookup_delete() {
+    let (_dir, db) = open_temp();
+    let uid = db.create_first_user("mike", "h").unwrap().unwrap();
+    db.create_session("tok", uid, 3600).unwrap();
+    assert_eq!(db.session_username("tok").unwrap().as_deref(), Some("mike"));
+    db.delete_session("tok").unwrap();
+    assert_eq!(db.session_username("tok").unwrap(), None);
+}
+
+#[test]
+fn expired_session_is_not_returned_and_sweeps() {
+    let (_dir, db) = open_temp();
+    let uid = db.create_first_user("mike", "h").unwrap().unwrap();
+    db.create_session("live", uid, 3600).unwrap();
+    db.create_session("dead", uid, -10).unwrap(); // already expired
+    assert_eq!(db.session_username("dead").unwrap(), None);
+    assert_eq!(
+        db.session_username("live").unwrap().as_deref(),
+        Some("mike")
+    );
+    db.sweep_expired_sessions().unwrap();
+    assert_eq!(
+        db.session_username("live").unwrap().as_deref(),
+        Some("mike")
+    );
+}
+
+#[test]
+fn admin_hash_verifies() {
+    let (_dir, db) = open_temp();
+    let hash = orchestrator::auth::hash_password("s3cret").unwrap();
+    db.create_first_user("admin", &hash).unwrap().unwrap();
+    let stored = db.get_user_hash("admin").unwrap().unwrap();
+    assert!(orchestrator::auth::verify_password("s3cret", &stored));
+    assert!(!orchestrator::auth::verify_password("nope", &stored));
+}

@@ -8,12 +8,60 @@
 	import '@fontsource/ibm-plex-mono/latin-600.css';
 	import '$lib/theme.css';
 
+	import { onMount } from 'svelte';
 	import { page } from '$app/state';
+	import { api, setUnauthorizedHandler, type AuthUser } from '$lib/api';
 	import { breadcrumb } from '$lib/breadcrumb';
 	import { dashboardStore } from '$lib/dashboard';
 	import Toast from '$lib/components/Toast.svelte';
+	import Login from '$lib/components/Login.svelte';
+	import Setup from '$lib/components/Setup.svelte';
 
 	let { children } = $props();
+
+	// Auth gate: probe the session before rendering the app. If unauthenticated,
+	// show onboarding when no account exists yet, otherwise the login view. Any
+	// 401 from any API call (via the client's global handler) drops back to login.
+	let auth = $state<'loading' | 'setup' | 'out' | 'in'>('loading');
+	let user = $state<AuthUser | null>(null);
+
+	async function check() {
+		try {
+			user = await api.auth.me();
+			auth = 'in';
+			return;
+		} catch {
+			user = null;
+		}
+		try {
+			auth = (await api.auth.setupNeeded()).needed ? 'setup' : 'out';
+		} catch {
+			auth = 'out';
+		}
+	}
+
+	async function logout() {
+		try {
+			await api.auth.logout();
+		} finally {
+			user = null;
+			auth = 'out';
+		}
+	}
+
+	// During the initial probe, check() decides setup-vs-login itself; only let a
+	// later 401 (session expired mid-session) drop back to login.
+	let booted = false;
+	setUnauthorizedHandler(() => {
+		if (!booted) return;
+		user = null;
+		auth = 'out';
+	});
+
+	onMount(async () => {
+		await check();
+		booted = true;
+	});
 
 	type NavSection = 'flows' | 'runs' | 'schedules' | 'secrets' | 'workers';
 
@@ -30,7 +78,12 @@
 	const statusLine = $derived(running !== undefined ? `${running} running` : 'ready');
 </script>
 
-<div class="shell">
+{#if auth === 'setup'}
+	<Setup onDone={check} />
+{:else if auth === 'out'}
+	<Login onAuthed={check} />
+{:else if auth === 'in'}
+	<div class="shell">
 	<aside class="sidebar">
 		<div class="brand">
 			<div class="logo">
@@ -186,13 +239,20 @@
 					<span class={i === $breadcrumb.length - 1 ? 'crumb-cur' : 'crumb-dim'}>{segment}</span>
 				{/each}
 			</div>
+			{#if user}
+				<div class="account">
+					<span class="account-user" title="Signed in">{user.username}</span>
+					<button type="button" class="logout" onclick={logout}>Log out</button>
+				</div>
+			{/if}
 		</header>
 
 		<div class="content">
 			{@render children()}
 		</div>
 	</main>
-</div>
+	</div>
+{/if}
 
 <Toast />
 
@@ -361,6 +421,37 @@
 		align-items: center;
 		gap: 8px;
 		min-width: 0;
+	}
+
+	.account {
+		margin-left: auto;
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		flex: 0 0 auto;
+	}
+
+	.account-user {
+		font: 500 12px 'IBM Plex Mono', monospace;
+		color: var(--muted);
+		white-space: nowrap;
+	}
+
+	.logout {
+		height: 30px;
+		padding: 0 12px;
+		border-radius: 8px;
+		border: 1px solid var(--border2);
+		background: var(--panel);
+		color: var(--muted);
+		font: 500 12px 'IBM Plex Mono', monospace;
+		cursor: pointer;
+		white-space: nowrap;
+	}
+
+	.logout:hover {
+		color: var(--text);
+		background: var(--panel2);
 	}
 
 	.crumb-dim {

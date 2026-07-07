@@ -7,11 +7,17 @@
 set -euo pipefail
 
 ORCH_URL="${ORCH_URL:-http://127.0.0.1:4400}"
+# The API is gated by a login. On a fresh server this creates the admin via
+# first-run setup; on an existing one it signs in. Override for a configured
+# instance: ORCH_USER / ORCH_PASSWORD (password must be >= 8 chars).
+ORCH_USER="${ORCH_USER:-demo}"
+ORCH_PASSWORD="${ORCH_PASSWORD:-demo-password}"
 MOCK_HOST=127.0.0.1
 MOCK_PORT=4599
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FLOW_FILE="$ROOT/examples/demo-flow.yaml"
 FLOW_ID=demo_civic_minutes
+COOKIE_JAR="$(mktemp)"
 
 # ---------------------------------------------------------------------------
 # Mock API on 127.0.0.1:4599
@@ -73,7 +79,7 @@ print(f"[mock] listening on http://{HOST}:{PORT}", flush=True)
 ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 PY
 MOCK_PID=$!
-cleanup() { kill "$MOCK_PID" 2>/dev/null || true; }
+cleanup() { kill "$MOCK_PID" 2>/dev/null || true; rm -f "$COOKIE_JAR"; }
 trap cleanup EXIT
 
 # Wait for the mock to accept requests.
@@ -95,9 +101,30 @@ if [ -z "$ok" ]; then
   exit 1
 fi
 
+# Authenticate. A fresh server has no account, so the first-run setup endpoint
+# creates the admin; an already-configured server signs in instead. Either way
+# the session cookie lands in $COOKIE_JAR for the guarded calls below.
+needs_setup=$(curl -sf "$ORCH_URL/api/auth/setup" | python3 -c \
+  'import sys, json; print(json.load(sys.stdin)["needed"])' 2>/dev/null || echo "")
+if [ "$needs_setup" = "True" ]; then
+  echo "creating admin account '$ORCH_USER' (first-run setup) ..."
+  auth_path="/api/auth/setup"
+else
+  echo "signing in as '$ORCH_USER' ..."
+  auth_path="/api/auth/login"
+fi
+auth_response=$(curl -sS -c "$COOKIE_JAR" -X POST "$ORCH_URL$auth_path" \
+  -H 'content-type: application/json' \
+  -d "{\"username\": \"$ORCH_USER\", \"password\": \"$ORCH_PASSWORD\"}")
+if ! printf '%s' "$auth_response" | grep -q "\"$ORCH_USER\""; then
+  echo "error: authentication failed: $auth_response" >&2
+  echo "for an already-configured server, set ORCH_USER / ORCH_PASSWORD." >&2
+  exit 1
+fi
+
 # Import the demo flow (re-running re-imports as a new revision — fine).
 echo "importing $FLOW_FILE ..."
-import_response=$(curl -sS -X POST "$ORCH_URL/api/flows/import" \
+import_response=$(curl -sS -b "$COOKIE_JAR" -X POST "$ORCH_URL/api/flows/import" \
   --data-binary @"$FLOW_FILE")
 if ! printf '%s' "$import_response" | grep -q "\"$FLOW_ID\""; then
   echo "error: import failed: $import_response" >&2
@@ -106,7 +133,7 @@ fi
 echo "imported flow $FLOW_ID"
 
 # Trigger a run.
-run_response=$(curl -sS -X POST "$ORCH_URL/api/flows/$FLOW_ID/run" \
+run_response=$(curl -sS -b "$COOKIE_JAR" -X POST "$ORCH_URL/api/flows/$FLOW_ID/run" \
   -H 'content-type: application/json' \
   -d '{"inputs": {"regions": ["ON", "QC"], "dry_run": false}}')
 RUN_ID=$(printf '%s' "$run_response" | python3 -c \
@@ -122,7 +149,7 @@ echo
 # Follow the run to completion (keep the mock alive until it finishes).
 STATUS=queued
 for _ in $(seq 1 120); do
-  STATUS=$(curl -sf "$ORCH_URL/api/runs/$RUN_ID" | python3 -c \
+  STATUS=$(curl -sf -b "$COOKIE_JAR" "$ORCH_URL/api/runs/$RUN_ID" | python3 -c \
     'import sys, json; print(json.load(sys.stdin)["run"]["status"])')
   case "$STATUS" in
     queued|running) sleep 1 ;;
@@ -131,7 +158,7 @@ for _ in $(seq 1 120); do
 done
 
 echo "run $RUN_ID finished: $STATUS"
-curl -sf "$ORCH_URL/api/runs/$RUN_ID" | python3 -c '
+curl -sf -b "$COOKIE_JAR" "$ORCH_URL/api/runs/$RUN_ID" | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
 for t in d["tasks"]:

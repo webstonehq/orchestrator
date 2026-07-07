@@ -176,12 +176,33 @@ ALTER TABLE task_runs ADD COLUMN created_at TEXT;
 UPDATE task_runs SET created_at = COALESCE(started_at, finished_at);
 "#;
 
+/// Human authentication: `users` (username + argon2id hash) and server-side
+/// `sessions` (opaque token → user, with an expiry). Empty until an admin is
+/// seeded from env at startup; distinct from the worker bearer-token scheme.
+const MIGRATION_005: &str = r#"
+CREATE TABLE users (
+  id         INTEGER PRIMARY KEY,
+  username   TEXT NOT NULL UNIQUE,
+  pw_hash    TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE sessions (
+  token      TEXT PRIMARY KEY,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX idx_sessions_expires ON sessions(expires_at);
+"#;
+
 /// Embedded migrations, applied in order; versions recorded in `migrations`.
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, MIGRATION_001),
     (2, MIGRATION_002),
     (3, MIGRATION_003),
     (4, MIGRATION_004),
+    (5, MIGRATION_005),
 ];
 
 // ---------------------------------------------------------------------------
@@ -421,6 +442,106 @@ impl Db {
     /// Check out a raw pooled connection (e.g. for the secrets store).
     pub fn conn(&self) -> DbResult<PooledConn> {
         Ok(self.pool.get()?)
+    }
+
+    // -- auth: users & sessions ---------------------------------------------
+
+    /// Whether any user account exists. Drives the first-run onboarding gate:
+    /// an empty table means the setup screen is offered until an admin is made.
+    pub fn has_users(&self) -> DbResult<bool> {
+        let conn = self.conn()?;
+        Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM users)", [], |r| r.get(0))?)
+    }
+
+    /// Create the first (admin) user, but only while the table is empty.
+    /// Returns the new id, or `None` if a user already exists (setup already
+    /// done). Uses an IMMEDIATE transaction so two concurrent setup attempts
+    /// can't both win the empty-table race.
+    pub fn create_first_user(&self, username: &str, pw_hash: &str) -> DbResult<Option<i64>> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM users)", [], |r| r.get(0))?;
+        if exists {
+            return Ok(None);
+        }
+        let now = now_rfc3339();
+        tx.execute(
+            "INSERT INTO users (username, pw_hash, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?3)",
+            params![username, pw_hash, now],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
+    /// The id of a user by username, if they exist.
+    pub fn get_user_id(&self, username: &str) -> DbResult<Option<i64>> {
+        let conn = self.conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT id FROM users WHERE username = ?1",
+                [username],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// The stored argon2 hash for a username, if the user exists.
+    pub fn get_user_hash(&self, username: &str) -> DbResult<Option<String>> {
+        let conn = self.conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT pw_hash FROM users WHERE username = ?1",
+                [username],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Create a session valid for `ttl_secs` from now.
+    pub fn create_session(&self, token: &str, user_id: i64, ttl_secs: i64) -> DbResult<()> {
+        let conn = self.conn()?;
+        let now = chrono::Utc::now();
+        let created = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let expires = (now + chrono::Duration::seconds(ttl_secs))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        conn.execute(
+            "INSERT INTO sessions (token, user_id, created_at, expires_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![token, user_id, created, expires],
+        )?;
+        Ok(())
+    }
+
+    /// Username for a live (unexpired) session token, if any.
+    pub fn session_username(&self, token: &str) -> DbResult<Option<String>> {
+        let conn = self.conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT u.username FROM sessions s JOIN users u ON u.id = s.user_id \
+                 WHERE s.token = ?1 AND s.expires_at > ?2",
+                params![token, now_rfc3339()],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Delete a session (logout). Ok whether or not the row existed.
+    pub fn delete_session(&self, token: &str) -> DbResult<()> {
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM sessions WHERE token = ?1", [token])?;
+        Ok(())
+    }
+
+    /// Delete all expired session rows (opportunistic cleanup at login).
+    pub fn sweep_expired_sessions(&self) -> DbResult<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM sessions WHERE expires_at < ?1",
+            [now_rfc3339()],
+        )?;
+        Ok(())
     }
 
     // -- flows --------------------------------------------------------------
