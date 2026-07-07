@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use orchestrator::db::Db;
 use orchestrator::engine::{Engine, LocalSink, RemoteSink, RunEvent, RunUpdate, apply_update};
-use orchestrator::plugins::PluginRegistry;
 use orchestrator::secrets::SecretStore;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -34,7 +33,7 @@ fn scratch() -> Scratch {
         .expect("pool");
     let secrets =
         Arc::new(SecretStore::open(&dir.path().join("master.key"), pool).expect("secrets"));
-    let engine = Engine::new(db.clone(), Arc::new(PluginRegistry::builtin()), secrets);
+    let engine = Engine::new(db.clone(), Arc::new(orchestrator::plugins::testing::http_registry()), secrets);
     Scratch {
         _dir: dir,
         db,

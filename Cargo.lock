@@ -1529,6 +1529,8 @@ dependencies = [
  "dirs",
  "futures",
  "jsonschema",
+ "libc",
+ "plugin-sdk",
  "r2d2",
  "r2d2_sqlite",
  "reqwest 0.13.4",
@@ -1610,6 +1612,29 @@ name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+
+[[package]]
+name = "plugin-http"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "plugin-sdk",
+ "reqwest 0.13.4",
+ "serde_json",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
 
 [[package]]
 name = "poly1305"

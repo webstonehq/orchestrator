@@ -15,7 +15,6 @@ use axum::http::{HeaderMap, Request, StatusCode, header};
 use orchestrator::api::{self, AppState};
 use orchestrator::db::{Db, RunStatusUpdate, now_rfc3339};
 use orchestrator::engine::Engine;
-use orchestrator::plugins::PluginRegistry;
 use orchestrator::scheduler::{RunLauncher, Scheduler, SystemClock};
 use orchestrator::secrets::SecretStore;
 use serde_json::{Value, json};
@@ -51,7 +50,7 @@ fn new_env() -> Env {
         .expect("build secrets pool");
     let secrets =
         Arc::new(SecretStore::open(&dir.path().join("master.key"), pool).expect("open secrets"));
-    let registry = Arc::new(PluginRegistry::builtin());
+    let registry = Arc::new(orchestrator::plugins::testing::http_registry());
     let engine = Engine::new(db.clone(), Arc::clone(&registry), Arc::clone(&secrets));
     let scheduler = Scheduler::new(db.clone(), Arc::new(NoopLauncher), Arc::new(SystemClock));
     let state = AppState {

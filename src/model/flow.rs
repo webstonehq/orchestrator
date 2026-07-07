@@ -155,7 +155,7 @@ pub struct TaskDef {
 /// The two task shapes: a plugin invocation or a parallel fan-out.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TaskKind {
-    /// Run a registered [`crate::plugins::TaskPlugin`].
+    /// Run a registered plugin (by `type_id`).
     Plugin(PluginTask),
     /// Fan out child tasks over an items array.
     Parallel(ParallelTask),

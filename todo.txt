@@ -1,2 +1,2 @@
 2026-07-05 Respect the XDG config
-2026-07-05 BYOW - Bring Your Own Worker
+2026-07-06 Support all CLI flags via env vars

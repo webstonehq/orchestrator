@@ -77,6 +77,10 @@ struct ClaimBody {
     worker_id: String,
     queues: Vec<String>,
     capacity: u32,
+    /// Task types this worker can execute. Absent for older workers → treated
+    /// as unknown coverage, not zero.
+    #[serde(default)]
+    capabilities: Vec<crate::plugins::PluginCapability>,
 }
 
 #[derive(Serialize)]
@@ -93,7 +97,13 @@ async fn claim(
     let queues: Vec<&str> = body.queues.iter().map(String::as_str).collect();
     let assignments = state
         .engine
-        .claim_remote(&body.worker_id, &queues, body.capacity, LEASE_SECS)
+        .claim_remote(
+            &body.worker_id,
+            &queues,
+            body.capacity,
+            body.capabilities,
+            LEASE_SECS,
+        )
         .map_err(ApiError::internal)?;
     Ok(Json(ClaimResponse { assignments }))
 }

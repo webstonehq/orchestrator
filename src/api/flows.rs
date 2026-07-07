@@ -238,11 +238,22 @@ async fn validate_flow(
 ) -> Json<Value> {
     // Always 200; problems live in the body so the UI builder can render
     // them inline without special-casing an error status.
-    let errors = match parse_and_validate(body.definition, &state) {
-        Ok(_) => Vec::new(),
-        Err(errors) => errors,
+    //
+    // `errors` block a save; `warnings` are advisory (e.g. no live worker on
+    // the flow's queue yet provides a task type) and never block one.
+    let def: FlowDefinition = match serde_json::from_value(body.definition) {
+        Ok(def) => def,
+        Err(e) => {
+            return Json(json!({
+                "errors": [{ "path": "definition", "message": e.to_string() }],
+                "warnings": [],
+            }));
+        }
     };
-    Json(json!({ "errors": errors }))
+    let mut errors = model::validate(&def, &state.registry);
+    let report = coverage(&def, &state);
+    errors.extend(report.errors);
+    Json(json!({ "errors": errors, "warnings": report.warnings }))
 }
 
 async fn export_flow(
@@ -369,12 +380,29 @@ fn parse_and_validate(
             message: e.to_string(),
         }]
     })?;
-    let errors = model::validate(&def, &state.registry);
+    let mut errors = model::validate(&def, &state.registry);
+    // Version skew between the server's plugin and the queue's workers blocks a
+    // save (advisory coverage warnings do not).
+    errors.extend(coverage(&def, state).errors);
     if errors.is_empty() {
         Ok(def)
     } else {
         Err(errors)
     }
+}
+
+/// Cross-check a flow's plugins against the workers on its queue: the server's
+/// own plugin versions are the reference; the queue's live workers supply the
+/// comparison set.
+fn coverage(def: &FlowDefinition, state: &AppState) -> model::CoverageReport {
+    let reference = state
+        .registry
+        .capabilities()
+        .into_iter()
+        .filter_map(|c| c.version.map(|v| (c.type_id, v)))
+        .collect();
+    let queue_caps = state.engine.queue_capability_list(&def.queue);
+    model::coverage_report(def, &reference, &queue_caps)
 }
 
 /// Persist a definition as a new revision, then resync schedule state and

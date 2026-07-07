@@ -2,7 +2,7 @@
 //!
 //! The crate ships as a single binary, but the modules live in a lib target so
 //! integration tests (`tests/`) can use them directly and so contributors get
-//! rustdoc for the plugin API (`plugins::TaskPlugin`).
+//! rustdoc for the plugin API (`plugins::PluginEntry`).
 
 pub mod api;
 pub mod config;

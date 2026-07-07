@@ -57,7 +57,7 @@ use tokio_util::sync::CancellationToken;
 use crate::db::{Db, DbError};
 use crate::expr;
 use crate::model::{FlowDefinition, InputType};
-use crate::plugins::PluginRegistry;
+use crate::plugins::{PluginCapability, PluginRegistry};
 use crate::secrets::{SecretStore, SecretsError};
 
 pub use events::RunEvent;
@@ -175,6 +175,9 @@ const WORKER_STALE_AFTER_SECS: i64 = 90;
 struct WorkerInfo {
     queues: Vec<String>,
     capacity: u32,
+    /// Task types this worker can execute (from its plugin registry). Empty for
+    /// older workers that don't advertise; treated as "unknown", not "none".
+    capabilities: Vec<PluginCapability>,
     last_seen: chrono::DateTime<chrono::Utc>,
 }
 
@@ -191,6 +194,8 @@ pub struct WorkerStatus {
     pub last_seen: String,
     /// Seen within [`WORKER_ONLINE_WITHIN_SECS`].
     pub online: bool,
+    /// Task types this worker advertised on its last claim.
+    pub capabilities: Vec<PluginCapability>,
 }
 
 /// The run executor. One instance per process, shared behind an [`Arc`].
@@ -391,11 +396,12 @@ impl Engine {
         worker_id: &str,
         queues: &[&str],
         capacity: u32,
+        capabilities: Vec<PluginCapability>,
         lease_secs: i64,
     ) -> Result<Vec<wire::Assignment>, EngineError> {
         // A claim is the reliable liveness beat: workers poll it every cycle
-        // even when idle, so this keeps queues/capacity/last-seen current.
-        // `capacity` here is the worker's TOTAL configured capacity.
+        // even when idle, so this keeps queues/capacity/capabilities/last-seen
+        // current. `capacity` here is the worker's TOTAL configured capacity.
         self.workers
             .lock()
             .expect("engine.workers poisoned")
@@ -404,6 +410,7 @@ impl Engine {
                 WorkerInfo {
                     queues: queues.iter().map(|q| q.to_string()).collect(),
                     capacity,
+                    capabilities,
                     last_seen: chrono::Utc::now(),
                 },
             );
@@ -530,12 +537,38 @@ impl Engine {
                         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                     queues: info.queues,
                     capacity: info.capacity,
+                    capabilities: info.capabilities,
                     worker_id,
                 }
             })
             .collect();
         out.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
         Ok(out)
+    }
+
+    /// Capabilities (with versions) advertised by currently-live workers
+    /// subscribed to `queue`. May contain the same `type_id` more than once when
+    /// multiple workers serve the queue. Stale workers (unseen past
+    /// [`WORKER_STALE_AFTER_SECS`]) are ignored.
+    pub fn queue_capability_list(&self, queue: &str) -> Vec<PluginCapability> {
+        let now = chrono::Utc::now();
+        self.workers
+            .lock()
+            .expect("engine.workers poisoned")
+            .values()
+            .filter(|w| (now - w.last_seen).num_seconds() < WORKER_STALE_AFTER_SECS)
+            .filter(|w| w.queues.iter().any(|q| q == queue))
+            .flat_map(|w| w.capabilities.iter().cloned())
+            .collect()
+    }
+
+    /// Task types executable on `queue` (just the `type_id`s). Empty means no
+    /// live worker there provides anything.
+    pub fn queue_capabilities(&self, queue: &str) -> std::collections::HashSet<String> {
+        self.queue_capability_list(queue)
+            .into_iter()
+            .map(|c| c.type_id)
+            .collect()
     }
 
     /// Reap runs whose worker lease lapsed: fail them in the database and end

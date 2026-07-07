@@ -14,7 +14,6 @@ use axum::Router;
 use orchestrator::api::{self, AppState};
 use orchestrator::db::Db;
 use orchestrator::engine::Engine;
-use orchestrator::plugins::PluginRegistry;
 use orchestrator::scheduler::{RunLauncher, Scheduler, SystemClock};
 use orchestrator::secrets::SecretStore;
 use orchestrator::worker::{self, WorkerConfig};
@@ -47,7 +46,7 @@ fn server() -> Server {
         .expect("pool");
     let secrets =
         Arc::new(SecretStore::open(&dir.path().join("master.key"), pool).expect("secrets"));
-    let registry = Arc::new(PluginRegistry::builtin());
+    let registry = Arc::new(orchestrator::plugins::testing::http_registry());
     let engine = Engine::new(db.clone(), Arc::clone(&registry), Arc::clone(&secrets));
     let scheduler = Scheduler::new(db.clone(), Arc::new(NoopLauncher), Arc::new(SystemClock));
     let state = AppState {
@@ -135,6 +134,7 @@ async fn worker_claims_executes_and_reports_gpu_run() {
         capacity: 2,
         db_path: wdir.path().join("worker.db"),
         key_path: wdir.path().join("worker.key"),
+        plugins_dir: orchestrator::plugins::testing::staged_http_dir().to_path_buf(),
     };
     let shutdown = CancellationToken::new();
     let worker_task = tokio::spawn(worker::run(cfg, shutdown.clone()));
@@ -165,9 +165,13 @@ async fn worker_claims_executes_and_reports_gpu_run() {
 async fn worker_registry_reports_status() {
     let srv = server();
     // A claim registers the worker even when it yields no work.
+    let caps = vec![orchestrator::plugins::PluginCapability {
+        type_id: "gpu.train".to_string(),
+        version: Some("1.2.0".to_string()),
+    }];
     let assignments = srv
         .engine
-        .claim_remote("w-alpha", &["gpu", "cpu"], 3, 30)
+        .claim_remote("w-alpha", &["gpu", "cpu"], 3, caps, 30)
         .expect("claim");
     assert!(assignments.is_empty());
 
@@ -179,13 +183,23 @@ async fn worker_registry_reports_status() {
     assert_eq!(w.capacity, 3);
     assert_eq!(w.in_flight, 0);
     assert!(w.online, "just-claimed worker should be online");
+    // The advertised capability is retained and reported.
+    assert_eq!(w.capabilities.len(), 1);
+    assert_eq!(w.capabilities[0].type_id, "gpu.train");
+    assert_eq!(w.capabilities[0].version.as_deref(), Some("1.2.0"));
+
+    // ...and it drives per-queue coverage: available on `gpu`, absent on `cpu`.
+    let gpu = srv.engine.queue_capabilities("gpu");
+    assert!(gpu.contains("gpu.train"));
+    let other = srv.engine.queue_capabilities("nope");
+    assert!(other.is_empty());
 }
 
 #[tokio::test]
 async fn workers_endpoint_reports_enabled_and_list() {
     let srv = server(); // has worker token "secret"
     srv.engine
-        .claim_remote("w1", &["gpu"], 2, 30)
+        .claim_remote("w1", &["gpu"], 2, vec![], 30)
         .expect("claim");
     let addr = spawn(srv.app.clone()).await;
 

@@ -40,7 +40,7 @@ fn new_env_full(sleeper: Option<Sleeper>, registry: Option<PluginRegistry>) -> E
         .expect("build secrets pool");
     let secrets =
         Arc::new(SecretStore::open(&dir.path().join("master.key"), pool).expect("open secrets"));
-    let registry = Arc::new(registry.unwrap_or_else(PluginRegistry::builtin));
+    let registry = Arc::new(registry.unwrap_or_else(orchestrator::plugins::testing::http_registry));
     let engine = match sleeper {
         Some(sleeper) => {
             Engine::new_with_sleeper(db.clone(), registry, Arc::clone(&secrets), sleeper)
@@ -1249,46 +1249,20 @@ async fn empty_parallel_items_succeeds_with_empty_result() {
 // 20. Panic safety: a panicking plugin never leaks an active-map entry
 // ---------------------------------------------------------------------------
 
-struct PanicPlugin;
-
-#[async_trait::async_trait]
-impl orchestrator::plugins::TaskPlugin for PanicPlugin {
-    fn manifest(&self) -> orchestrator::plugins::PluginManifest {
-        orchestrator::plugins::PluginManifest {
-            type_id: "test.panic".to_string(),
-            label: "Panic".to_string(),
-            description: String::new(),
-            icon: "bomb".to_string(),
-            color: "#ff0000".to_string(),
-            fields: vec![],
-        }
-    }
-
-    fn validate(&self, _config: &Value) -> Vec<String> {
-        vec![]
-    }
-
-    async fn execute(
-        &self,
-        _ctx: &orchestrator::plugins::TaskContext,
-        _config: Value,
-    ) -> Result<Value, orchestrator::plugins::TaskError> {
-        panic!("deliberate test panic");
-    }
-}
-
+/// A run whose task fails must still clean up: close the broadcast channel and
+/// drop its active entry. (Previously exercised with an in-process panicking
+/// plugin; with subprocess plugins an abnormal failure surfaces as a fatal task
+/// error, which must trigger the same cleanup.)
 #[tokio::test]
-async fn panicking_plugin_does_not_leak_active_entry() {
-    let mut registry = PluginRegistry::builtin();
-    registry.register(Arc::new(PanicPlugin));
-    let env = new_env_full(None, Some(registry));
-
+async fn failing_task_cleans_up_active_entry() {
+    let env = new_env_full(None, None);
     save_flow(
         &env,
         "boom",
         json!({
             "name": "boom",
-            "tasks": [{"id": "t1", "type": "test.panic", "config": {}}]
+            // Connection refused → the http plugin errors; one attempt, then fail.
+            "tasks": [{"id": "t1", "type": "http.request", "config": {"url": "http://127.0.0.1:1/"}}]
         }),
     );
 
@@ -1296,12 +1270,12 @@ async fn panicking_plugin_does_not_leak_active_entry() {
     env.engine.start(run_id).unwrap();
     let mut rx = env.engine.subscribe(run_id).expect("run active");
 
-    // The drop-guard must close the broadcast channel even on panic.
+    // The drop-guard must close the broadcast channel when the run ends.
     tokio::time::timeout(Duration::from_secs(10), async {
         while !matches!(rx.recv().await, Err(broadcast::error::RecvError::Closed)) {}
     })
     .await
-    .expect("broadcast channel never closed after panic");
+    .expect("broadcast channel never closed after failure");
 
     // ... and remove the run from the active set.
     assert_eq!(env.engine.active_run_count(), 0);

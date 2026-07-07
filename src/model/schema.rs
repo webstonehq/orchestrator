@@ -337,7 +337,7 @@ mod tests {
         // `codemirror-json-schema` can't resolve `$ref`s when proposing values,
         // so enum-typed properties must carry their values inline at the use
         // site — here, a trigger's `catchup`.
-        let s = flow_json_schema(&PluginRegistry::builtin());
+        let s = flow_json_schema(&crate::plugins::testing::manifest_registry());
         let catchup = &s["properties"]["triggers"]["items"]["properties"]["catchup"];
         let mut values = value_set(catchup);
         values.sort();
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn input_type_values_are_inline_for_completion() {
-        let s = flow_json_schema(&PluginRegistry::builtin());
+        let s = flow_json_schema(&crate::plugins::testing::manifest_registry());
         let ty = &s["properties"]["inputs"]["items"]["properties"]["type"];
         let mut values = value_set(ty);
         values.sort();
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn on_error_values_are_inline_for_completion() {
-        let s = flow_json_schema(&PluginRegistry::builtin());
+        let s = flow_json_schema(&crate::plugins::testing::manifest_registry());
         let http = task_branch(&s, "http.request").expect("http.request branch");
         let mut values = value_set(&http["properties"]["on_error"]);
         values.sort();
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn select_config_values_are_inline_for_completion() {
         // Config Select fields are emitted inline already; guard that path too.
-        let s = flow_json_schema(&PluginRegistry::builtin());
+        let s = flow_json_schema(&crate::plugins::testing::manifest_registry());
         let http = task_branch(&s, "http.request").expect("http.request branch");
         let method = &http["properties"]["config"]["properties"]["method"];
         assert!(value_set(method).contains(&"GET".to_string()));
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn root_describes_a_flow_document() {
-        let s = flow_json_schema(&PluginRegistry::builtin());
+        let s = flow_json_schema(&crate::plugins::testing::manifest_registry());
         assert_eq!(s["type"], json!("object"));
         // Top-level `id` (YAML-only, outside FlowDefinition) is present + required.
         assert_eq!(s["properties"]["id"]["type"], json!("string"));
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn tasks_reference_the_task_def() {
-        let s = flow_json_schema(&PluginRegistry::builtin());
+        let s = flow_json_schema(&crate::plugins::testing::manifest_registry());
         assert_eq!(
             s["properties"]["tasks"]["items"]["$ref"],
             json!("#/$defs/Task")
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn one_task_branch_per_plugin_plus_parallel() {
-        let registry = PluginRegistry::builtin();
+        let registry = crate::plugins::testing::manifest_registry();
         let s = flow_json_schema(&registry);
         let branches = s["$defs"]["Task"]["oneOf"].as_array().unwrap();
         assert_eq!(branches.len(), registry.manifests().len() + 1);
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn plugin_branch_carries_config_and_common_fields() {
-        let s = flow_json_schema(&PluginRegistry::builtin());
+        let s = flow_json_schema(&crate::plugins::testing::manifest_registry());
         let http = task_branch(&s, "http.request").expect("http.request branch");
         // Discriminator pinned to a const so autocomplete offers the type.
         assert_eq!(http["properties"]["type"]["const"], json!("http.request"));
@@ -432,7 +432,7 @@ mod tests {
     /// real flow stop matching the schema fails here first.
     #[test]
     fn real_flows_validate_against_the_schema() {
-        let schema = flow_json_schema(&PluginRegistry::builtin());
+        let schema = flow_json_schema(&crate::plugins::testing::manifest_registry());
         let validator = jsonschema::validator_for(&schema).expect("schema compiles");
 
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn parallel_branch_recurses_into_task() {
-        let s = flow_json_schema(&PluginRegistry::builtin());
+        let s = flow_json_schema(&crate::plugins::testing::manifest_registry());
         let par = task_branch(&s, "parallel").expect("parallel branch");
         assert_eq!(par["properties"]["type"]["const"], json!("parallel"));
         assert_eq!(

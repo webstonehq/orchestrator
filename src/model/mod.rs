@@ -18,7 +18,9 @@ pub use flow::{
     PluginTask, RetryPolicy, TaskDef, TaskKind, TriggerDef, VarDef,
 };
 pub use schema::flow_json_schema;
-pub use validate::{ValidationErr, cron_parser, is_valid_id, validate};
+pub use validate::{
+    CoverageReport, ValidationErr, coverage_report, cron_parser, is_valid_id, validate,
+};
 pub use yaml::{from_yaml, to_yaml};
 
 /// Error from model serialization/deserialization ([`to_yaml`] /

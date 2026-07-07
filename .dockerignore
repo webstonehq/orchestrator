@@ -1,0 +1,13 @@
+# Build artifacts and local state — rebuilt fresh inside the image.
+/target
+/.dev
+.git
+.github
+
+# UI: node_modules and the built bundle are regenerated in the UI build stage.
+ui/node_modules
+ui/build
+**/node_modules
+
+# Docs images aren't needed to build the binary.
+docs/screenshots

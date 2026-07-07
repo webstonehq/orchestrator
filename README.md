@@ -3,10 +3,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 Orchestrator is a single-binary workflow orchestration tool. Flows are ordered
-lists of tasks — HTTP requests in v1, extensible via a Rust plugin trait —
-with typed inputs, variables, cron triggers, parallel fan-out, retries, and
-full run observability. One Rust binary serves the web UI, JSON API,
-scheduler, and executor; state lives in a single SQLite file.
+lists of tasks — each task type is a drop-in **plugin bundle** (an executable in
+any language, with `http.request` shipped as one) — with typed inputs,
+variables, cron triggers, parallel fan-out, retries, and full run observability.
+One Rust binary serves the web UI, JSON API, scheduler, and executor; state
+lives in a single SQLite file.
 
 ![The flow editor: the YAML document and the visual builder side by side, kept in sync](docs/screenshots/flow-builder.png)
 
@@ -15,7 +16,7 @@ scheduler, and executor; state lives in a single SQLite file.
 ## Features
 
 - Flows defined as YAML or in the visual builder (both round-trip)
-- HTTP request tasks (v1), more task types via plugins
+- Task types are drop-in plugin bundles in any language (`http.request` ships as one)
 - Parallel fan-out over arrays with a live per-item inspector
 - Cron schedules with timezone support and catch-up policies
 - Every save is a revision; restore any revision
@@ -42,9 +43,15 @@ scheduler, and executor; state lives in a single SQLite file.
 Requires Rust (see `rust-toolchain.toml`) and Node.js.
 
 ```sh
-# Build the UI (one self-contained index.html), then the binary
+# Build the UI (one self-contained index.html), then the workspace
 cd ui && npm install && npm run build && cd ..
-cargo build --release
+cargo build --release            # builds the server and the shipped plugins
+
+# Stage the shipped plugin bundles next to the binary (http.request is a bundle,
+# discovered from plugins/ beside the binary at startup)
+mkdir -p target/release/plugins/http
+cp plugins/http/plugin.json target/release/plugins/http/
+cp target/release/orchestrator-plugin-http target/release/plugins/http/
 
 # Run
 ./target/release/orchestrator serve
@@ -256,83 +263,192 @@ orchestrator secrets --db ~/.orchestrator/orchestrator.db \
 
 ## Writing a plugin
 
-A task type is a plugin: one Rust module contributing both execution code and
-a declarative UI manifest. The frontend renders every task inspector from the
-manifests served at `/api/plugins`, so a new task type needs zero frontend
-changes.
+Every task type is a **plugin bundle**: a directory with a `plugin.json`
+(metadata + a declarative UI manifest) and an executable. There are no
+compiled-in plugins — the shipped `http.request` is itself a bundle (see
+`plugins/http`). Bundles live in the plugins directory (default `plugins/` next
+to the binary, override with `--plugins-dir`). At startup Orchestrator reads
+each `plugin.json` — **without executing anything** — so the plugin appears in
+the task palette, inspector, schema, and validation immediately; malformed or
+unsupported bundles are skipped with a warning, never fatal. The frontend
+renders every task inspector from the manifest served at `/api/plugins`, so a
+new task type needs **zero frontend changes**.
 
-1. Add a module under `src/plugins/` and implement `TaskPlugin`
-   (`src/plugins/mod.rs`):
+The engine talks to a plugin only over a small newline-delimited JSON protocol
+on stdin/stdout, so plugins can be written in **any language**. A Rust SDK
+(`plugin-sdk`, a workspace crate) handles the protocol for you.
+
+```
+plugins/
+  slack-notify/
+    plugin.json     # metadata + declarative manifest (read at startup, never executed)
+    slack-notify    # the executable (any language)
+```
+
+### plugin.json
+
+```json
+{
+  "schema_version": 1,
+  "name": "slack-notify",
+  "version": "0.2.0",
+  "entrypoint": "slack-notify",
+  "lifecycle": "oneshot",
+  "supports_validate": false,
+  "manifest": {
+    "type_id": "slack.notify",
+    "label": "Slack Notify",
+    "description": "Post a message to a channel",
+    "icon": "message-square",
+    "color": "#4A154B",
+    "fields": [
+      { "key": "channel", "label": "Channel", "widget": "text", "required": true },
+      { "key": "text", "label": "Message", "widget": "template", "required": true, "template": true }
+    ]
+  }
+}
+```
+
+The widget vocabulary is `select`, `template`, `keyvalue`, `number`, `duration`,
+`toggle`, `text`, `code`. A `required` field with a `default` is treated as
+optional at save time (the default fills in).
+
+### Lifecycle
+
+`lifecycle` (default `oneshot`) decides how the engine runs the process:
+
+- **`oneshot`** — spawned fresh for each task. Trivial to write, naturally
+  isolated, cancellation just kills the process. Right for most plugins.
+- **`persistent`** — one long-lived process serves many concurrent tasks,
+  multiplexed by request id. Use it when a plugin holds warm state worth reusing
+  across tasks — a pooled HTTP client, a warmed model, a DB connection. The
+  shipped `http.request` is persistent so a wide fan-out reuses connections
+  instead of re-handshaking. It's a bit more to author (see the protocol).
+
+### Authoring in Rust (plugin-sdk)
+
+Implement `plugin_sdk::Plugin` and let `run` speak the protocol. This is how the
+`http` plugin is written (`plugins/http` is the reference):
 
 ```rust
-use crate::plugins::{FieldSpec, PluginManifest, TaskContext, TaskError, TaskPlugin, Widget};
+use plugin_sdk::{Ctx, Lifecycle, Plugin, PluginError, PluginManifest};
 
-pub struct EchoPlugin;
+struct Echo;
 
 #[async_trait::async_trait]
-impl TaskPlugin for EchoPlugin {
-    fn manifest(&self) -> PluginManifest {
-        PluginManifest {
-            type_id: "echo".into(),
-            label: "Echo".into(),
-            description: "Return the configured message".into(),
-            icon: "box".into(),
-            color: "#7ee787".into(),
-            fields: vec![FieldSpec {
-                key: "message".into(),
-                label: "Message".into(),
-                widget: Widget::Template,   // gets the expression picker for free
-                required: true,
-                default: serde_json::Value::Null,
-                help: "supports {{ }} templates".into(),
-                options: None,
-                min: None,
-                max: None,
-                template: true,
-            }],
-        }
-    }
+impl Plugin for Echo {
+    fn manifest(&self) -> PluginManifest { /* type_id, label, fields, … */ }
 
     fn validate(&self, config: &serde_json::Value) -> Vec<String> {
-        // Config as authored — {{ }} expressions still unrendered.
+        // Authored config — {{ }} still unrendered. Only called if supports_validate.
         match config.get("message") {
             Some(serde_json::Value::String(s)) if !s.is_empty() => vec![],
             _ => vec!["message is required".into()],
         }
     }
 
-    async fn execute(
-        &self,
-        ctx: &TaskContext,
-        config: serde_json::Value, // fully rendered; templates keep JSON types
-    ) -> Result<serde_json::Value, TaskError> {
-        ctx.info("echoing");
+    async fn execute(&self, ctx: &Ctx, config: serde_json::Value)
+        -> Result<serde_json::Value, PluginError>
+    {
+        ctx.info("echoing");                        // streams into the run view
         Ok(serde_json::json!({ "message": config["message"] }))
     }
 }
+
+#[tokio::main]
+async fn main() {
+    plugin_sdk::run(Echo, Lifecycle::Oneshot).await; // or Lifecycle::Persistent
+}
 ```
 
-2. Register it in `PluginRegistry::builtin` (`src/plugins/mod.rs`):
-
-```rust
-registry.register(Arc::new(echo::EchoPlugin));
-```
-
-That's it — the UI renders your manifest automatically: task palette entry,
-inspector fields (widget vocabulary: `select`, `template`, `keyvalue`,
-`number`, `duration`, `toggle`, `text`, `code`), YAML round-trip, validation
-plumbing, and run views all come for free.
-
-Execution contract: log through `ctx.info/ok/warn/err/dbg` (lines stream into
-the run view), honor `ctx.cancel` promptly, and don't implement your own
-retries or timeouts — the engine owns both. Return `TaskError::retryable`
-for transient failures and `TaskError::fatal` for definitive ones; declared
+Add the crate under `plugins/`, `cargo build` it, and drop the binary next to a
+`plugin.json` in the plugins dir. Execution contract: log through
+`ctx.info/ok/warn/err/dbg`, honor `ctx.cancelled()`, and don't implement your
+own retries or timeouts — the engine owns both. Return `PluginError::retryable`
+for transient failures and `PluginError::fatal` for definitive ones; declared
 task `outputs` extract from the JSON you return (paths rooted at `result`).
+
+### The wire protocol (any language)
+
+Newline-delimited JSON. `stdout` is the protocol channel; write diagnostics to
+`stderr`. The `config` is **fully rendered** — all `{{ }}` resolved, including
+plaintext secrets — so a plugin runs at the same trust level as a worker; it's
+delivered on stdin (never argv/env) so it stays out of the process list.
+
+**Oneshot** — the engine spawns the entrypoint per task, writes one request,
+reads events until a terminal one, then the process exits:
+
+```json
+// → stdin
+{ "mode": "execute", "run_id": 42, "task_id": "say_hi", "config": { "channel": "#general" } }
+// ← stdout (one JSON object per line)
+{ "type": "log", "level": "info", "message": "posting…" }
+{ "type": "result", "value": { "ok": true } }
+```
+
+`level` ∈ `info | ok | warn | err | dbg`; the stream ends at a terminal
+`result` (its `value` is what `outputs` extract from) or
+`{ "type": "error", "message": "…", "retryable": true|false }`. A complete
+oneshot plugin in a few lines of Python:
+
+```python
+#!/usr/bin/env python3
+import sys, json
+req = json.load(sys.stdin); cfg = req.get("config", {})
+def emit(o): print(json.dumps(o), flush=True)
+emit({"type": "log", "level": "info", "message": f"posting to {cfg['channel']}"})
+emit({"type": "result", "value": {"ok": True}})
+```
+
+**Persistent** — emit `{ "type": "ready" }` on start, then read **id-tagged**
+requests until stdin closes, running them concurrently and streaming id-tagged
+events per request:
+
+```json
+// → stdin
+{ "id": 7, "mode": "execute", "run_id": 42, "task_id": "…", "config": {…} }
+{ "id": 7, "mode": "cancel" }
+// ← stdout
+{ "id": 7, "type": "log", "level": "info", "message": "…" }
+{ "id": 7, "type": "result", "value": {…} }
+```
+
+On `cancel`, stop that id and emit its terminal event. On a hard timeout the
+engine kills the whole process (taking siblings with it), so honor cancel.
+
+**Cancellation.** Oneshot: the engine sends `SIGTERM`, then `SIGKILL` after a
+short grace — handle `SIGTERM` to clean up. Persistent: a `cancel` message,
+escalating to killing the process.
+
+### Optional save-time validation
+
+Set `"supports_validate": true` and the engine runs `<entrypoint> validate` at
+flow-save time — one `{ "config": … }` line in, a terminal
+`{ "type": "validation", "errors": [...] }` out — with the **authored** config
+(templates *unrendered* — don't interpret `{{ }}`). Keep it fast (it blocks the
+save, bounded to a few seconds) and side-effect free. Without it, validation is
+schema-derived from the manifest (required fields with no default). The
+`plugin-sdk` handles the `validate` subcommand for you.
+
+### Running on workers
+
+Execution happens wherever the flow's `queue` routes, so install the bundle on
+every worker that serves that queue (see [BYOW](#bring-your-own-worker-byow)) as
+well as on the server (which needs the manifest for the UI). Workers advertise
+their installed plugins to the server, which uses that at save time:
+
+- No live worker on the queue provides a task type → an advisory **warning**
+  (the run will wait until one connects).
+- A worker runs a **different version** of the plugin than the server's copy →
+  a blocking **error**: align the `version` in both `plugin.json`s.
+
+Note: plugins currently target Unix (cancellation and the validate watchdog use
+POSIX signals).
 
 ## Configuration
 
 ```
-orchestrator serve [--listen ADDR] [--db PATH] [--key PATH] [--worker-token TOKEN]
+orchestrator serve [--listen ADDR] [--db PATH] [--key PATH] [--worker-token TOKEN] [--plugins-dir PATH]
 ```
 
 | flag             | default                           |
@@ -341,6 +457,7 @@ orchestrator serve [--listen ADDR] [--db PATH] [--key PATH] [--worker-token TOKE
 | `--db`           | `~/.orchestrator/orchestrator.db` |
 | `--key`          | `~/.orchestrator/master.key`      |
 | `--worker-token` | none (worker API disabled; repeatable, or `ORCH_WORKER_TOKENS`) |
+| `--plugins-dir`  | `plugins/` beside the binary (external plugin bundles) |
 
 `~/.orchestrator` is created with 0700 permissions if missing. Server log
 verbosity is controlled with the standard `RUST_LOG` env var (default
@@ -394,9 +511,10 @@ inbound reachability and work fine behind NAT. See
 
 `orchestrator worker` flags: `--server`, `--token` (or `ORCH_WORKER_TOKEN`),
 `--id`, `--queues` (comma-separated, default `default`), `--capacity`, `--db`
-(scratch), `--key` (the worker's own secrets key). Populate that key's store
-with `orchestrator secrets set NAME` (and `list` / `delete`) — it targets
-`--db`/`--key`, defaulting to the same worker paths.
+(scratch), `--key` (the worker's own secrets key), `--plugins-dir` (external
+plugin bundles this worker can execute; default `plugins/` beside the binary).
+Populate the secret store with `orchestrator secrets set NAME` (and `list` /
+`delete`) — it targets `--db`/`--key`, defaulting to the same worker paths.
 
 ## Security notes
 
@@ -425,11 +543,15 @@ is compiled, so Rust edits trigger an incremental recompile and a server
 restart (a few seconds) — the closest thing to HMR a compiled backend can do.
 Dev state (DB + key) lives in `./.dev`, never `~/.orchestrator`. Run the halves
 separately with `mise run dev-ui` / `mise run dev-api` if you prefer two
-terminals.
+terminals. The `dev`/`dev-api`/`dev-worker` tasks depend on `stage-plugins`,
+which builds every `plugins/*` bundle and stages it into `target/debug/plugins`
+(the default plugins-dir), so `http.request` and any other plugin are available
+in dev.
 
 Without mise, run the pieces yourself:
 
 ```sh
+mise run stage-plugins                   # build + stage plugin bundles (or stage by hand)
 cargo run -- serve                       # backend on :4400 (restart manually on change)
 cd ui && npm run dev                     # UI dev server; proxies /api to :4400
 cargo test                               # Rust tests (unit + integration)

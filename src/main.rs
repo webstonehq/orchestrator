@@ -53,6 +53,11 @@ enum Command {
         /// worker API is disabled.
         #[arg(long = "worker-token", value_name = "TOKEN")]
         worker_tokens: Vec<String>,
+
+        /// Directory scanned at startup for external plugin bundles
+        /// [default: `plugins/` beside the binary].
+        #[arg(long, value_name = "PATH")]
+        plugins_dir: Option<PathBuf>,
     },
 
     /// Run as a worker: dial a server, claim queued runs off the given
@@ -85,6 +90,11 @@ enum Command {
         /// This worker's own secrets key file [default: ~/.orchestrator/worker.key].
         #[arg(long, value_name = "PATH")]
         key: Option<PathBuf>,
+
+        /// Directory of external plugin bundles this worker can execute
+        /// [default: `plugins/` beside the binary].
+        #[arg(long, value_name = "PATH")]
+        plugins_dir: Option<PathBuf>,
     },
 
     /// Manage a local secret store directly, without a running server.
@@ -154,7 +164,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             db,
             key,
             worker_tokens,
-        } => serve(listen, db, key, worker_tokens).await,
+            plugins_dir,
+        } => serve(listen, db, key, worker_tokens, plugins_dir).await,
         Command::Worker {
             server,
             token,
@@ -163,9 +174,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             capacity,
             db,
             key,
-        } => worker(server, token, id, queues, capacity, db, key).await,
+            plugins_dir,
+        } => worker(server, token, id, queues, capacity, db, key, plugins_dir).await,
         Command::Secrets { db, key, action } => secrets(db, key, action),
     }
+}
+
+/// Default external-plugin bundle directory: `plugins/` next to the running
+/// binary, falling back to `./plugins` if the executable path is unavailable.
+fn default_plugins_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("plugins")))
+        .unwrap_or_else(|| PathBuf::from("plugins"))
 }
 
 async fn serve(
@@ -173,6 +194,7 @@ async fn serve(
     db: Option<PathBuf>,
     key: Option<PathBuf>,
     worker_tokens: Vec<String>,
+    plugins_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -205,8 +227,16 @@ async fn serve(
     let secrets_pool = r2d2::Pool::builder().max_size(4).build(manager)?;
     let secrets = Arc::new(SecretStore::open(&config.key_path, secrets_pool)?);
 
-    // Plugin registry and engine.
-    let registry = Arc::new(PluginRegistry::builtin());
+    // Plugin registry and engine. External binary plugins are discovered from
+    // the bundle directory (default: `plugins/` beside the binary) and skipped
+    // with a warning if malformed — never fatal to startup.
+    let plugins_dir = plugins_dir.unwrap_or_else(default_plugins_dir);
+    let registry = {
+        let mut registry = PluginRegistry::new();
+        tracing::info!(dir = %plugins_dir.display(), "scanning for plugins");
+        registry.load_external(&plugins_dir);
+        Arc::new(registry)
+    };
     let engine = Engine::new(db.clone(), Arc::clone(&registry), Arc::clone(&secrets));
 
     // Startup recovery: runs left queued/running by an unclean shutdown are
@@ -298,6 +328,7 @@ async fn reaper(engine: Arc<Engine>, shutdown: CancellationToken) {
 
 /// Entry point for `orchestrator worker`: dial the server and execute claimed
 /// runs locally until ctrl-c.
+#[allow(clippy::too_many_arguments)] // one param per worker CLI flag; a struct would just move the list
 async fn worker(
     server: String,
     token: String,
@@ -306,6 +337,7 @@ async fn worker(
     capacity: u32,
     db: Option<PathBuf>,
     key: Option<PathBuf>,
+    plugins_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -327,6 +359,7 @@ async fn worker(
         capacity,
         db_path: db.unwrap_or_else(|| dir.join("worker.db")),
         key_path: key.unwrap_or_else(|| dir.join("worker.key")),
+        plugins_dir: plugins_dir.unwrap_or_else(default_plugins_dir),
     };
 
     let shutdown = CancellationToken::new();

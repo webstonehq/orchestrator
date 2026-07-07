@@ -1,25 +1,26 @@
-//! Task plugin trait, registry, and built-in plugins.
+//! The plugin registry and host.
 //!
-//! A task type in Orchestrator is a *plugin*: a single Rust module that
-//! contributes both the execution code and a declarative UI manifest. The
-//! frontend renders every task inspector from these manifests (served at
-//! `/api/plugins`), so adding a new task type requires zero frontend changes:
+//! A task type is a *plugin*: an external binary bundle discovered from a
+//! plugins directory (see [`external`]). Each bundle's `plugin.json` carries a
+//! declarative manifest — the frontend renders every task inspector from these
+//! (served at `/api/plugins`), so a new task type needs zero frontend changes.
 //!
-//! 1. Add a module under `src/plugins/` and implement [`TaskPlugin`].
-//! 2. Register it in [`PluginRegistry::builtin`].
-//!
-//! That's it — the builder UI, YAML round-trip, validation plumbing, and run
-//! views all come for free. See `docs/plans/2026-07-05-orchestrator-design.md`
-//! §2 for the full rationale.
+//! The engine talks to plugins only through [`PluginEntry`] (via the stdio
+//! protocol): [`PluginEntry::execute`] runs a task (spawn-per-task for
+//! `oneshot`, a long-lived process for `persistent`) and [`PluginEntry::validate`]
+//! checks a config at save time. There is no in-process plugin code. Rust
+//! plugins are authored against the `plugin-sdk` crate; see
+//! `docs/plans/2026-07-07-unified-plugin-protocol-design.md`.
 
-pub mod http;
+pub mod external;
+pub mod persistent;
+#[doc(hidden)]
+pub mod testing;
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
-
-use serde::Serialize;
-use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Severity of a log line emitted by a task during execution.
 ///
@@ -118,7 +119,7 @@ impl TaskContext {
     }
 }
 
-/// Error returned by [`TaskPlugin::execute`].
+/// Error returned by `PluginEntry::execute`.
 ///
 /// `retryable` tells the engine whether re-running the task could plausibly
 /// succeed (e.g. connection refused, HTTP 5xx) or not (bad config, HTTP 4xx).
@@ -157,219 +158,161 @@ impl fmt::Display for TaskError {
 
 impl std::error::Error for TaskError {}
 
-/// A task type: execution code plus a declarative config UI.
-///
-/// Implement this trait, register the plugin in [`PluginRegistry::builtin`],
-/// and Orchestrator takes care of everything else — the task inspector is
-/// rendered from [`TaskPlugin::manifest`], configs are checked with
-/// [`TaskPlugin::validate`] at save time, and the engine calls
-/// [`TaskPlugin::execute`] with a fully rendered config at run time.
-#[async_trait::async_trait]
-pub trait TaskPlugin: Send + Sync {
-    /// Static metadata and the declarative config UI for this task type.
-    ///
-    /// Called freely and often; must be cheap and deterministic.
-    fn manifest(&self) -> PluginManifest;
+// The manifest and capability wire types are the shared plugin contract; they
+// live in `plugin-sdk` (which plugins depend on) and are re-exported here so the
+// rest of the app keeps referring to `crate::plugins::{PluginManifest, …}`.
+pub use plugin_sdk::{FieldSpec, Lifecycle, PluginCapability, PluginManifest, Widget};
 
-    /// Validate a task's config JSON as authored (template expressions still
-    /// unrendered — do not try to interpret `{{ … }}` contents).
-    ///
-    /// Returns human-readable problems, one per message (e.g.
-    /// `"url is required"`). An empty vec means the config is acceptable.
-    fn validate(&self, config: &serde_json::Value) -> Vec<String>;
+/// How a registered plugin's process is driven.
+pub(crate) enum Executor {
+    /// Spawned fresh for each task.
+    Oneshot,
+    /// One long-lived process multiplexing many concurrent requests.
+    Persistent(persistent::PersistentPlugin),
+}
 
-    /// Execute the task with a fully-rendered config (all `{{ … }}`
-    /// expressions already resolved by the engine; rendered values keep
-    /// their JSON types).
-    ///
-    /// Returns a JSON result the task's declared outputs extract from.
-    /// Contract:
-    /// - Honor `ctx.cancel`: stop work promptly when it fires and return an
-    ///   error. The engine determines canceled-ness by consulting the
-    ///   cancellation token after `execute` returns — the error a plugin
-    ///   returns on cancellation is display-only (`"canceled"` by
-    ///   convention).
-    /// - Do not impose timeouts or retries — the engine owns both.
-    /// - Set [`TaskError::retryable`] honestly; it drives the retry policy.
-    async fn execute(
+/// A registered task type: its manifest plus how to run and validate it. Built
+/// only from `plugin.json` bundles — there are no in-process plugins.
+pub struct PluginEntry {
+    manifest: PluginManifest,
+    version: Option<String>,
+    supports_validate: bool,
+    program: PathBuf,
+    args: Vec<String>,
+    cwd: PathBuf,
+    term_grace: Duration,
+    validate_timeout: Duration,
+    executor: Executor,
+}
+
+impl PluginEntry {
+    /// The plugin's declarative manifest.
+    pub fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+
+    /// The plugin's advertised version, if any.
+    pub fn version(&self) -> Option<String> {
+        self.version.clone()
+    }
+
+    /// Execute one task with a fully-rendered `config`, streaming logs to `ctx`
+    /// and honoring `ctx.cancel`. Dispatches by lifecycle.
+    pub async fn execute(
         &self,
         ctx: &TaskContext,
         config: serde_json::Value,
-    ) -> Result<serde_json::Value, TaskError>;
+    ) -> Result<serde_json::Value, TaskError> {
+        match &self.executor {
+            Executor::Persistent(mgr) => {
+                let req = persistent::RequestPayload {
+                    run_id: ctx.run_id,
+                    task_id: ctx.task_id.clone(),
+                    config,
+                };
+                mgr.execute(req, ctx).await
+            }
+            Executor::Oneshot => {
+                external::oneshot_execute(
+                    &self.program,
+                    &self.args,
+                    &self.cwd,
+                    self.term_grace,
+                    ctx,
+                    config,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Validate an authored `config` at save time: schema-derived checks, plus a
+    /// one-shot `<binary> validate` call when the bundle opts in.
+    pub fn validate(&self, config: &serde_json::Value) -> Vec<String> {
+        let mut errs = external::validate_against_manifest(&self.manifest, config);
+        if self.supports_validate {
+            match external::run_plugin_validate(
+                &self.program,
+                &self.args,
+                &self.cwd,
+                config,
+                self.validate_timeout,
+            ) {
+                Ok(mut plugin_errs) => errs.append(&mut plugin_errs),
+                Err(reason) => tracing::warn!(
+                    type_id = %self.manifest.type_id,
+                    reason,
+                    "plugin validate failed; using schema checks only"
+                ),
+            }
+        }
+        errs
+    }
 }
 
-/// Static description of a plugin, served as JSON at `/api/plugins`.
-///
-/// The frontend renders the task palette entry and the whole task inspector
-/// from this — a plugin never ships frontend code.
-#[derive(Serialize, Clone)]
-pub struct PluginManifest {
-    /// Unique task type id, e.g. `"http.request"`.
-    pub type_id: String,
-    /// Display name, e.g. `"HTTP request"`.
-    pub label: String,
-    /// One-line description shown in the task palette.
-    pub description: String,
-    /// Icon name from the built-in icon set.
-    pub icon: String,
-    /// Accent color (CSS hex).
-    pub color: String,
-    /// Config fields, rendered in order in the task inspector.
-    pub fields: Vec<FieldSpec>,
-}
-
-/// One config field in a plugin manifest.
-#[derive(Serialize, Clone)]
-pub struct FieldSpec {
-    /// Key in the task's `config` object.
-    pub key: String,
-    /// Display label.
-    pub label: String,
-    /// Which UI widget renders this field.
-    pub widget: Widget,
-    /// Whether the field must be set.
-    pub required: bool,
-    /// Default value (omitted from JSON when null).
-    #[serde(skip_serializing_if = "Value::is_null")]
-    pub default: Value,
-    /// Help text shown under the field.
-    pub help: String,
-    /// Choices for [`Widget::Select`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub options: Option<Vec<String>>,
-    /// Lower bound for [`Widget::Number`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min: Option<f64>,
-    /// Upper bound for [`Widget::Number`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max: Option<f64>,
-    /// Whether the field's value supports `{{ … }}` template expressions
-    /// (the UI attaches the expression picker automatically).
-    pub template: bool,
-}
-
-/// Widget vocabulary for [`FieldSpec::widget`] (v1).
-///
-/// Serialized lowercase (`"select"`, `"keyvalue"`, …).
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "lowercase")]
-pub enum Widget {
-    /// Cycling chip / dropdown; value is one of `options`.
-    Select,
-    /// Single-line expression editor; value is a template string.
-    Template,
-    /// Key + template-value rows; value is `[{key, value}]`.
-    Keyvalue,
-    /// Numeric stepper (`min` / `max`); value is a number.
-    Number,
-    /// Seconds input with unit hint; value is a number (seconds).
-    Duration,
-    /// On/off switch; value is a bool.
-    Toggle,
-    /// Plain string input, no expressions; value is a string.
-    Text,
-    /// Multi-line text (raw bodies, prompts); value is a template string.
-    Code,
-}
-
-/// Compile-time registry of all task plugins, keyed by `type_id`.
+/// Registry of task plugins, keyed by `type_id`, discovered from bundle
+/// directories. The engine's sole handle to plugins.
+#[derive(Default)]
 pub struct PluginRegistry {
-    plugins: BTreeMap<String, Arc<dyn TaskPlugin>>,
+    plugins: BTreeMap<String, PluginEntry>,
 }
 
 impl PluginRegistry {
-    /// The registry with all built-in plugins. New plugins register here.
-    pub fn builtin() -> Self {
-        let mut registry = Self {
-            plugins: BTreeMap::new(),
-        };
-        registry.register(Arc::new(http::HttpPlugin::new()));
-        registry
+    /// An empty registry. Plugins are added via [`PluginRegistry::load_external`].
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Register a plugin.
-    ///
-    /// # Panics
-    /// Panics if a plugin with the same `type_id` is already registered —
-    /// that's a programmer error, caught at startup.
-    pub fn register(&mut self, p: Arc<dyn TaskPlugin>) {
-        let type_id = p.manifest().type_id;
-        if self.plugins.contains_key(&type_id) {
-            panic!("duplicate plugin type_id: {type_id}");
+    /// Discover and register plugin bundles from a directory. Malformed,
+    /// unsupported, or colliding bundles are skipped with a warning — discovery
+    /// never fails the process. Absent `dir` is a no-op.
+    pub fn load_external(&mut self, dir: &Path) {
+        for entry in external::load_bundles(dir) {
+            match self.plugins.entry(entry.manifest.type_id.clone()) {
+                std::collections::btree_map::Entry::Occupied(e) => {
+                    tracing::warn!(type_id = %e.key(), "skipping plugin: type_id already registered");
+                }
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    tracing::info!(type_id = %e.key(), "loaded plugin");
+                    e.insert(entry);
+                }
+            }
         }
-        self.plugins.insert(type_id, p);
+    }
+
+    /// Register a pre-built entry (used by tests / bundle staging).
+    pub fn insert(&mut self, entry: PluginEntry) {
+        self.plugins.insert(entry.manifest.type_id.clone(), entry);
     }
 
     /// Look up a plugin by its `type_id`.
-    pub fn get(&self, type_id: &str) -> Option<Arc<dyn TaskPlugin>> {
-        self.plugins.get(type_id).cloned()
+    pub fn get(&self, type_id: &str) -> Option<&PluginEntry> {
+        self.plugins.get(type_id)
     }
 
     /// All plugin manifests, in stable order (sorted by `type_id`).
     pub fn manifests(&self) -> Vec<PluginManifest> {
-        self.plugins.values().map(|p| p.manifest()).collect()
+        self.plugins.values().map(|e| e.manifest.clone()).collect()
+    }
+
+    /// Capabilities of every registered plugin, in stable order — what a worker
+    /// advertises so the server knows which task types this node can run.
+    pub fn capabilities(&self) -> Vec<PluginCapability> {
+        self.plugins
+            .values()
+            .map(|e| PluginCapability {
+                type_id: e.manifest.type_id.clone(),
+                version: e.version.clone(),
+            })
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
-
-    struct DummyPlugin {
-        type_id: &'static str,
-    }
-
-    #[async_trait::async_trait]
-    impl TaskPlugin for DummyPlugin {
-        fn manifest(&self) -> PluginManifest {
-            PluginManifest {
-                type_id: self.type_id.to_string(),
-                label: "Dummy".to_string(),
-                description: String::new(),
-                icon: "box".to_string(),
-                color: "#888888".to_string(),
-                fields: vec![],
-            }
-        }
-
-        fn validate(&self, _config: &Value) -> Vec<String> {
-            vec![]
-        }
-
-        async fn execute(&self, _ctx: &TaskContext, _config: Value) -> Result<Value, TaskError> {
-            Ok(Value::Null)
-        }
-    }
-
-    #[test]
-    fn builtin_registry_contains_http_request() {
-        let registry = PluginRegistry::builtin();
-        let plugin = registry.get("http.request").expect("http.request missing");
-        assert_eq!(plugin.manifest().type_id, "http.request");
-        assert!(registry.get("no.such.plugin").is_none());
-    }
-
-    #[test]
-    fn manifests_are_sorted_by_type_id() {
-        let mut registry = PluginRegistry::builtin();
-        registry.register(Arc::new(DummyPlugin { type_id: "zz.last" }));
-        registry.register(Arc::new(DummyPlugin {
-            type_id: "aaa.first",
-        }));
-        let ids: Vec<String> = registry
-            .manifests()
-            .into_iter()
-            .map(|m| m.type_id)
-            .collect();
-        assert_eq!(ids, vec!["aaa.first", "http.request", "zz.last"]);
-    }
-
-    #[test]
-    #[should_panic(expected = "duplicate plugin type_id: http.request")]
-    fn duplicate_register_panics() {
-        let mut registry = PluginRegistry::builtin();
-        registry.register(Arc::new(http::HttpPlugin::new()));
-    }
 
     #[test]
     fn log_level_display_tags() {

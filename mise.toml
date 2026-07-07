@@ -9,10 +9,14 @@ watchexec = "latest"
 # ---------------------------------------------------------------------------
 # Local development
 #
-#   mise run dev        UI hot-reload + backend auto-restart together
-#   mise run dev-ui     UI only (Vite HMR on :5173)
-#   mise run dev-api    backend only (:4400, rebuild+restart on Rust changes)
-#   mise run dev-worker BYOW worker against the local server (run alongside `dev`)
+#   mise run dev           UI hot-reload + backend auto-restart together
+#   mise run dev-ui        UI only (Vite HMR on :5173)
+#   mise run dev-api       backend only (:4400, rebuild+restart on Rust changes)
+#   mise run dev-worker    BYOW worker against the local server (run alongside `dev`)
+#   mise run stage-plugins build + stage plugins/* bundles into target/debug/plugins
+#
+# The dev tasks depend on stage-plugins, so http.request (and any other plugin
+# bundle) is present in the default plugins-dir.
 #
 # Open http://localhost:5173 — the Vite dev server hot-reloads the UI in place
 # and proxies /api to the backend on :4400. UI edits apply instantly (HMR);
@@ -26,8 +30,34 @@ watchexec = "latest"
 # executes on the worker instead of the server. Visible under Workers in the UI.
 # ---------------------------------------------------------------------------
 
+[tasks.stage-plugins]
+description = "Build and stage every plugin bundle (plugins/*) into target/debug/plugins"
+run = """
+cargo build --workspace --bins
+dest="target/debug/plugins"
+# Any plugins/<name>/ with a plugin.json is a bundle. plugins/sdk is a library
+# (no plugin.json) and is skipped automatically.
+for pj in plugins/*/plugin.json; do
+  [ -e "$pj" ] || continue
+  name=$(basename "$(dirname "$pj")")
+  entrypoint=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['entrypoint'])" "$pj")
+  mkdir -p "$dest/$name"
+  cp "$pj" "$dest/$name/plugin.json"
+  if [ -f "target/debug/$entrypoint" ]; then
+    cp "target/debug/$entrypoint" "$dest/$name/$entrypoint"   # Rust plugin crate
+  elif [ -f "plugins/$name/$entrypoint" ]; then
+    cp "plugins/$name/$entrypoint" "$dest/$name/$entrypoint"  # prebuilt/script bundle
+  else
+    echo "stage-plugins: entrypoint '$entrypoint' for plugin '$name' not found" >&2
+    exit 1
+  fi
+  echo "staged $name"
+done
+"""
+
 [tasks.dev]
 description = "Local dev: UI hot-reload + backend auto-restart (open http://localhost:5173)"
+depends = ["stage-plugins"]
 env = { RUST_LOG = "info,orchestrator=debug" }
 run = """
 mkdir -p .dev
@@ -40,6 +70,7 @@ wait
 
 [tasks.dev-api]
 description = "Backend only on :4400 — recompiles + restarts on Rust source changes"
+depends = ["stage-plugins"]
 env = { RUST_LOG = "info,orchestrator=debug" }
 run = """
 mkdir -p .dev
@@ -54,6 +85,7 @@ run = "npm install && npm run dev"
 
 [tasks.dev-worker]
 description = "BYOW worker connected to the local dev server (serves the gpu/test queues)"
+depends = ["stage-plugins"]
 env = { RUST_LOG = "info,orchestrator=debug" }
 run = """
 mkdir -p .dev

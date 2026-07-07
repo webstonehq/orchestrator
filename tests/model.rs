@@ -12,7 +12,7 @@ use serde_json::json;
 // ---------- helpers ----------
 
 fn registry() -> PluginRegistry {
-    PluginRegistry::builtin()
+    orchestrator::plugins::testing::manifest_registry()
 }
 
 /// A minimal valid http.request task.

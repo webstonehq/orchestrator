@@ -1,0 +1,21 @@
+[package]
+name = "plugin-http"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Orchestrator http.request task plugin"
+
+[[bin]]
+name = "orchestrator-plugin-http"
+path = "src/main.rs"
+
+[dependencies]
+plugin-sdk = { path = "../sdk" }
+async-trait = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "charset"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+wiremock = "0.6"

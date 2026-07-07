@@ -1,0 +1,16 @@
+[package]
+name = "plugin-sdk"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Protocol types and authoring run-loop for Orchestrator task plugins"
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-std", "io-util", "sync"] }
+tokio-util = "0.7"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

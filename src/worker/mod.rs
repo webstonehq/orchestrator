@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 
 use crate::db::Db;
 use crate::engine::{Assignment, Engine, LocalSink, RemoteSink, RunUpdate, SeqUpdate};
-use crate::plugins::PluginRegistry;
+use crate::plugins::{PluginCapability, PluginRegistry};
 use crate::secrets::SecretStore;
 
 /// How often the worker polls for work and heartbeats its in-flight runs.
@@ -49,6 +49,8 @@ pub struct WorkerConfig {
     pub db_path: PathBuf,
     /// This worker's own secrets key file.
     pub key_path: PathBuf,
+    /// Directory of external plugin bundles this worker can execute.
+    pub plugins_dir: PathBuf,
 }
 
 /// Shared handle to in-flight runs: server run id -> its cancellation token.
@@ -68,8 +70,17 @@ pub async fn run(
     });
     let pool = r2d2::Pool::builder().max_size(4).build(manager)?;
     let secrets = Arc::new(SecretStore::open(&cfg.key_path, pool)?);
-    let registry = Arc::new(PluginRegistry::builtin());
-    let engine = Engine::new(db.clone(), registry, secrets);
+    // The worker executes with its own plugin set: built-ins plus any external
+    // bundles it has installed. Its capabilities are advertised on every claim
+    // so the server can warn when a flow routes here for a plugin we lack.
+    let registry = {
+        let mut registry = PluginRegistry::new();
+        info!(dir = %cfg.plugins_dir.display(), "scanning for plugins");
+        registry.load_external(&cfg.plugins_dir);
+        registry
+    };
+    let capabilities = registry.capabilities();
+    let engine = Engine::new(db.clone(), Arc::new(registry), secrets);
     let client = reqwest::Client::new();
     let inflight: Inflight = Arc::new(Mutex::new(HashMap::new()));
 
@@ -78,6 +89,7 @@ pub async fn run(
         worker_id = %cfg.worker_id,
         queues = ?cfg.queues,
         capacity = cfg.capacity,
+        plugins = capabilities.len(),
         "worker started"
     );
 
@@ -89,7 +101,7 @@ pub async fn run(
         // status panel sees a stable capacity, not our shrinking free count.
         let held = inflight.lock().expect("inflight poisoned").len() as u32;
         if held < cfg.capacity {
-            match claim(&client, &cfg).await {
+            match claim(&client, &cfg, &capabilities).await {
                 Ok(assignments) => {
                     for assignment in assignments {
                         let token = CancellationToken::new();
@@ -237,12 +249,14 @@ async fn report_loop(
 async fn claim(
     client: &reqwest::Client,
     cfg: &WorkerConfig,
+    capabilities: &[PluginCapability],
 ) -> Result<Vec<Assignment>, reqwest::Error> {
     let url = format!("{}/api/worker/claim", cfg.server_url);
     let body = json!({
         "worker_id": cfg.worker_id,
         "queues": cfg.queues,
         "capacity": cfg.capacity,
+        "capabilities": capabilities,
     });
     let resp: ClaimResponse = client
         .post(&url)
