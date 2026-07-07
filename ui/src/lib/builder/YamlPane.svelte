@@ -48,6 +48,7 @@
 	import { stateExtensions, updateSchema } from 'codemirror-json-schema';
 	import { tags } from '@lezer/highlight';
 	import type { BuilderStore } from './state.svelte';
+	import { expressionGroups, makeExpressionCompletion } from './expr-complete';
 	import { flowToYaml } from './yaml';
 	import { yamlToDefinition, type YamlProblem } from './parse-yaml';
 	import { loadFlowSchema } from './flow-schema';
@@ -177,6 +178,14 @@
 		pushToEditor(text);
 	});
 
+	// -- {{ }} expression autocomplete ----------------------------------------
+
+	// Reads store.def + store.secretNames live on every query, so newly added
+	// tasks/vars/secrets show up without rebuilding the editor.
+	const expressionCompletion = makeExpressionCompletion(() =>
+		expressionGroups(store.def, store.secretNames)
+	);
+
 	// -- theme + highlighting (app palette) -----------------------------------
 
 	const highlightStyle = HighlightStyle.define([
@@ -253,8 +262,12 @@
 				// it from editor state (no-ops until then). Diagnostics from the
 				// schema are surfaced via applyEditorText, not a linter() extension,
 				// so the existing manual setDiagnostics stays the single owner.
-				autocompletion(),
+				autocompletion({ activateOnTyping: true }),
 				yamlLanguage.data.of({ autocomplete: yamlCompletion() }),
+				// `{{ }}` expression refs (vars/inputs/secrets/outputs). Registered as
+				// a second language-data source so it coexists with schema key
+				// completion above — CM6 queries every source at the cursor.
+				yamlLanguage.data.of({ autocomplete: expressionCompletion }),
 				hoverTooltip(yamlSchemaHover()),
 				stateExtensions(),
 				syntaxHighlighting(highlightStyle),
