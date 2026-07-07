@@ -396,14 +396,17 @@ impl Engine {
         // A claim is the reliable liveness beat: workers poll it every cycle
         // even when idle, so this keeps queues/capacity/last-seen current.
         // `capacity` here is the worker's TOTAL configured capacity.
-        self.workers.lock().expect("engine.workers poisoned").insert(
-            worker_id.to_string(),
-            WorkerInfo {
-                queues: queues.iter().map(|q| q.to_string()).collect(),
-                capacity,
-                last_seen: chrono::Utc::now(),
-            },
-        );
+        self.workers
+            .lock()
+            .expect("engine.workers poisoned")
+            .insert(
+                worker_id.to_string(),
+                WorkerInfo {
+                    queues: queues.iter().map(|q| q.to_string()).collect(),
+                    capacity,
+                    last_seen: chrono::Utc::now(),
+                },
+            );
         // Free slots = total capacity minus runs this worker already holds.
         let held = self
             .db
@@ -412,7 +415,9 @@ impl Engine {
             .copied()
             .unwrap_or(0);
         let available = capacity.saturating_sub(u32::try_from(held).unwrap_or(u32::MAX));
-        let rows = self.db.claim_runs(worker_id, queues, available, lease_secs)?;
+        let rows = self
+            .db
+            .claim_runs(worker_id, queues, available, lease_secs)?;
         let mut assignments = Vec::with_capacity(rows.len());
         for run in rows {
             self.remote_channel(run.id);
@@ -505,11 +510,11 @@ impl Engine {
     pub fn worker_statuses(&self) -> Result<Vec<WorkerStatus>, EngineError> {
         let now = chrono::Utc::now();
         let mut registry = self.workers.lock().expect("engine.workers poisoned");
-        registry.retain(|_, info| {
-            (now - info.last_seen).num_seconds() < WORKER_STALE_AFTER_SECS
-        });
-        let snapshot: Vec<(String, WorkerInfo)> =
-            registry.iter().map(|(id, i)| (id.clone(), i.clone())).collect();
+        registry.retain(|_, info| (now - info.last_seen).num_seconds() < WORKER_STALE_AFTER_SECS);
+        let snapshot: Vec<(String, WorkerInfo)> = registry
+            .iter()
+            .map(|(id, i)| (id.clone(), i.clone()))
+            .collect();
         drop(registry);
 
         let in_flight = self.db.in_flight_by_worker()?;

@@ -742,7 +742,10 @@ async fn dashboard_reports_metrics_and_next_scheduled() {
     create_flow(&env, "dash", sample_definition("Dash")).await;
     let now = now_rfc3339();
     for status_str in ["success", "failed"] {
-        let run_id = env.db.insert_run("dash", 1, "manual", "{}", "local", None).unwrap();
+        let run_id = env
+            .db
+            .insert_run("dash", 1, "manual", "{}", "local", None)
+            .unwrap();
         env.db
             .update_run_status(
                 run_id,

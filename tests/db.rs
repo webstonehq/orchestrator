@@ -177,7 +177,9 @@ fn insert_and_get_run_roundtrip() {
 fn update_run_status_sets_fields_and_preserves_timestamps() {
     let (_dir, db) = open_temp();
     seed_flow(&db, "f1");
-    let id = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    let id = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
 
     db.update_run_status(
         id,
@@ -216,11 +218,19 @@ fn list_runs_filters_paginates_and_counts() {
     seed_flow(&db, "f1");
     seed_flow(&db, "f2");
 
-    let r1 = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
-    let r2 = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
-    let r3 = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    let r1 = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
+    let r2 = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
+    let r3 = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
     let r4 = db.insert_run("f2", 1, "api", "{}", "local", None).unwrap();
-    let r5 = db.insert_run("f2", 1, "schedule", "{}", "local", None).unwrap();
+    let r5 = db
+        .insert_run("f2", 1, "schedule", "{}", "local", None)
+        .unwrap();
     set_run_status(&db, r1, "success");
     set_run_status(&db, r2, "success");
     db.update_run_status(
@@ -274,7 +284,9 @@ fn list_runs_filters_paginates_and_counts() {
 fn task_run_upsert_finish_and_list() {
     let (_dir, db) = open_temp();
     seed_flow(&db, "f1");
-    let run_id = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    let run_id = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
 
     let tr1 = db
         .upsert_task_run(run_id, "discover", "running", 1)
@@ -326,7 +338,9 @@ fn task_run_upsert_finish_and_list() {
 fn item_aggregates_and_compact_statuses() {
     let (_dir, db) = open_temp();
     seed_flow(&db, "f1");
-    let run_id = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    let run_id = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
     let tr = db.upsert_task_run(run_id, "fanout", "running", 1).unwrap();
 
     let items: Vec<serde_json::Value> = (0..6).map(|i| json!({ "n": i })).collect();
@@ -426,7 +440,9 @@ fn item_aggregates_and_compact_statuses() {
 fn logs_append_and_page_after_id() {
     let (_dir, db) = open_temp();
     seed_flow(&db, "f1");
-    let run_id = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    let run_id = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
 
     let mut ids = Vec::new();
     for i in 0..5 {
@@ -453,7 +469,9 @@ fn logs_append_and_page_after_id() {
     assert_eq!(page3[0].id, ids[4]);
 
     // Other runs' logs are not visible.
-    let run2 = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    let run2 = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
     assert!(db.list_logs(run2, 0, 10).unwrap().is_empty());
 }
 
@@ -530,9 +548,15 @@ fn mark_interrupted_fails_active_work() {
     let (_dir, db) = open_temp();
     seed_flow(&db, "f1");
 
-    let r_queued = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
-    let r_running = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
-    let r_done = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    let r_queued = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
+    let r_running = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
+    let r_done = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
     let now = db::now_rfc3339();
     db.update_run_status(
         r_running,
@@ -604,7 +628,9 @@ fn dashboard_metrics_on_seeded_data() {
     // durations 30s / 60s / 90s.
     let specs = [("success", 1, 30), ("success", 2, 60), ("failed", 1, 90)];
     for (status, hours_ago, dur) in specs {
-        let id = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+        let id = db
+            .insert_run("f1", 1, "manual", "{}", "local", None)
+            .unwrap();
         finish_run(
             &db,
             id,
@@ -615,7 +641,9 @@ fn dashboard_metrics_on_seeded_data() {
     }
 
     // Old success run: outside both the 24h and 30d windows.
-    let old = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    let old = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
     finish_run(
         &db,
         old,
@@ -656,7 +684,9 @@ fn flow_run_stats_batched_across_flows() {
     seed_flow(&db, "f3"); // never run
 
     // f1: success (60s) then failed (30s), both within 30d; failed is latest.
-    let a = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    let a = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
     finish_run(
         &db,
         a,
@@ -664,12 +694,16 @@ fn flow_run_stats_batched_across_flows() {
         &ago_hours(2),
         &ago_hours_plus_secs(2, 60),
     );
-    let b = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    let b = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
     let b_finished = ago_hours_plus_secs(1, 30);
     finish_run(&db, b, "failed", &ago_hours(1), &b_finished);
 
     // f2: an old success outside the 30d window, then a queued run (latest).
-    let c = db.insert_run("f2", 1, "manual", "{}", "local", None).unwrap();
+    let c = db
+        .insert_run("f2", 1, "manual", "{}", "local", None)
+        .unwrap();
     finish_run(
         &db,
         c,
@@ -677,7 +711,8 @@ fn flow_run_stats_batched_across_flows() {
         &ago_hours(40 * 24),
         &ago_hours_plus_secs(40 * 24, 600),
     );
-    db.insert_run("f2", 1, "manual", "{}", "local", None).unwrap();
+    db.insert_run("f2", 1, "manual", "{}", "local", None)
+        .unwrap();
 
     let stats = db.flow_run_stats().unwrap();
     assert_eq!(stats.len(), 2, "flows without runs get no entry");
@@ -723,7 +758,9 @@ fn claim_leases_matching_queue_runs_and_skips_others() {
     let (_dir, db) = open_temp();
     seed_flow(&db, "f1");
     let gpu = db.insert_run("f1", 1, "manual", "{}", "gpu", None).unwrap();
-    let _local = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    let _local = db
+        .insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
     let cpu = db.insert_run("f1", 1, "manual", "{}", "cpu", None).unwrap();
 
     let claimed = db.claim_runs("w1", &["gpu", "cpu"], 10, 30).unwrap();
@@ -762,7 +799,8 @@ fn claim_respects_capacity_and_never_double_claims() {
 fn claim_returns_empty_when_no_matching_work() {
     let (_dir, db) = open_temp();
     seed_flow(&db, "f1");
-    db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    db.insert_run("f1", 1, "manual", "{}", "local", None)
+        .unwrap();
     assert!(db.claim_runs("w1", &["gpu"], 5, 30).unwrap().is_empty());
     assert!(db.claim_runs("w1", &[], 5, 30).unwrap().is_empty());
     assert!(db.claim_runs("w1", &["local"], 0, 30).unwrap().is_empty());
@@ -817,7 +855,10 @@ fn renew_extends_only_owned_active_runs() {
     let n = db.renew_leases("w1", &[id], 3600).unwrap();
     assert_eq!(n, 1);
     let after = db.get_run(id).unwrap().unwrap().lease_expires_at;
-    assert!(after > before, "lease should extend: {before:?} -> {after:?}");
+    assert!(
+        after > before,
+        "lease should extend: {before:?} -> {after:?}"
+    );
 
     // A different worker cannot renew this run.
     assert_eq!(db.renew_leases("w2", &[id], 3600).unwrap(), 0);

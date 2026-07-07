@@ -61,7 +61,7 @@ impl Config {
 }
 
 /// `~/.orchestrator`, created with 0700 permissions if missing.
-fn default_dir() -> io::Result<PathBuf> {
+pub fn default_dir() -> io::Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,

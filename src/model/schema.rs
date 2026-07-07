@@ -381,12 +381,15 @@ mod tests {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let flows = [
             format!("{manifest_dir}/examples/demo-flow.yaml"),
-            format!("{manifest_dir}/ui/src/lib/builder/fixtures/council_alert_pipeline.export.yaml"),
+            format!(
+                "{manifest_dir}/ui/src/lib/builder/fixtures/council_alert_pipeline.export.yaml"
+            ),
             format!("{manifest_dir}/ui/src/lib/builder/fixtures/edge_case.export.yaml"),
         ];
 
         for path in flows {
-            let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            let yaml =
+                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
             let doc: Value =
                 serde_yaml_ng::from_str(&yaml).unwrap_or_else(|e| panic!("parse {path}: {e}"));
             let errors: Vec<String> = validator.iter_errors(&doc).map(|e| e.to_string()).collect();

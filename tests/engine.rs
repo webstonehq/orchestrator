@@ -842,7 +842,9 @@ async fn non_local_queue_run_stays_queued_and_starts_nothing() {
 
     // start() is a no-op for a non-local queue: nothing is spawned and the
     // run stays queued for a worker to claim.
-    env.engine.start(run_id).expect("start is a no-op, not an error");
+    env.engine
+        .start(run_id)
+        .expect("start is a no-op, not an error");
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(env.engine.active_run_count(), 0);
     let run = env.db.get_run(run_id).unwrap().unwrap();
@@ -857,7 +859,10 @@ async fn non_local_queue_run_stays_queued_and_starts_nothing() {
 async fn recover_interrupted_marks_running_rows_failed() {
     let env = new_env();
     save_flow(&env, "f", json!({"name": "f", "tasks": []}));
-    let run_id = env.db.insert_run("f", 1, "manual", "{}", "local", None).unwrap();
+    let run_id = env
+        .db
+        .insert_run("f", 1, "manual", "{}", "local", None)
+        .unwrap();
     env.db
         .update_run_status(
             run_id,

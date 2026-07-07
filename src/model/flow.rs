@@ -119,7 +119,9 @@ pub struct TriggerDef {
 }
 
 /// Catch-up policy for missed schedule fires. Serialized lowercase.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, schemars::JsonSchema)]
+#[derive(
+    Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Catchup {
     /// Skip everything missed.
@@ -185,7 +187,9 @@ pub struct RetryPolicy {
 
 /// What happens to the run when a task exhausts its attempts. Serialized
 /// lowercase.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, schemars::JsonSchema)]
+#[derive(
+    Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum OnError {
     /// Fail the whole run (the default).

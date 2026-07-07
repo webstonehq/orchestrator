@@ -86,6 +86,49 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         key: Option<PathBuf>,
     },
+
+    /// Manage a local secret store directly, without a running server.
+    ///
+    /// This is how you populate a worker's own secrets: a worker resolves
+    /// `{{ secrets.NAME }}` against its local store, and plaintext secrets
+    /// never travel from the server. Defaults target the worker store
+    /// (`~/.orchestrator/worker.{db,key}`); point `--db`/`--key` elsewhere to
+    /// manage a different store (e.g. the server's `orchestrator.db` +
+    /// `master.key`).
+    Secrets {
+        /// Path to the SQLite database holding the `secrets` table
+        /// [default: ~/.orchestrator/worker.db].
+        #[arg(long, value_name = "PATH", global = true)]
+        db: Option<PathBuf>,
+
+        /// Path to the secrets key file [default: ~/.orchestrator/worker.key].
+        #[arg(long, value_name = "PATH", global = true)]
+        key: Option<PathBuf>,
+
+        #[command(subcommand)]
+        action: SecretsAction,
+    },
+}
+
+/// Actions for `orchestrator secrets`. Values are never printed back.
+#[derive(Subcommand)]
+enum SecretsAction {
+    /// Set (create or update) a secret. If VALUE is omitted, it is read from
+    /// stdin — so the plaintext never lands in shell history or the process
+    /// list. A single trailing newline is stripped.
+    Set {
+        /// Secret name, referenced as `{{ secrets.NAME }}`.
+        name: String,
+        /// Secret value. Omit to read it from stdin.
+        value: Option<String>,
+    },
+    /// List secret names and timestamps (never values).
+    List,
+    /// Delete a secret. Exits non-zero if it did not exist.
+    Delete {
+        /// Secret name.
+        name: String,
+    },
 }
 
 /// [`RunLauncher`] backed by the engine: the scheduler inserts queued run
@@ -121,6 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             db,
             key,
         } => worker(server, token, id, queues, capacity, db, key).await,
+        Command::Secrets { db, key, action } => secrets(db, key, action),
     }
 }
 
@@ -187,7 +231,10 @@ async fn serve(
     // Reaper: fail runs whose worker lease has lapsed (only relevant when
     // workers are enabled, but harmless otherwise).
     if !config.worker_tokens.is_empty() {
-        tracing::info!("worker API enabled ({} token(s))", config.worker_tokens.len());
+        tracing::info!(
+            "worker API enabled ({} token(s))",
+            config.worker_tokens.len()
+        );
         tokio::spawn(reaper(Arc::clone(&engine), shutdown.clone()));
     }
 
@@ -291,4 +338,79 @@ async fn worker(
     worker_mod::run(cfg, shutdown)
         .await
         .map_err(|e| e as Box<dyn std::error::Error>)
+}
+
+/// Entry point for `orchestrator secrets`: open a local secret store and run a
+/// one-shot management action. No server, no scheduler — just the store.
+fn secrets(
+    db: Option<PathBuf>,
+    key: Option<PathBuf>,
+    action: SecretsAction,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Only resolve the default dir (which creates `~/.orchestrator` at 0700)
+    // when a default is actually needed, mirroring `Config::resolve`.
+    let (db_path, key_path) = match (db, key) {
+        (Some(db), Some(key)) => (db, key),
+        (db, key) => {
+            let dir = config::default_dir()?;
+            (
+                db.unwrap_or_else(|| dir.join("worker.db")),
+                key.unwrap_or_else(|| dir.join("worker.key")),
+            )
+        }
+    };
+
+    let manager = SqliteConnectionManager::file(&db_path).with_init(|conn| {
+        conn.busy_timeout(Duration::from_millis(5000))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(())
+    });
+    let pool = r2d2::Pool::builder().max_size(1).build(manager)?;
+    let store = SecretStore::open(&key_path, pool)?;
+
+    match action {
+        SecretsAction::Set { name, value } => {
+            let value = match value {
+                Some(value) => value,
+                None => read_secret_from_stdin()?,
+            };
+            store.set(&name, &value)?;
+            println!("secret {name:?} set");
+        }
+        SecretsAction::List => {
+            let metas = store.list()?;
+            if metas.is_empty() {
+                println!("no secrets in {}", db_path.display());
+            } else {
+                for meta in metas {
+                    println!("{}\tupdated {}", meta.name, meta.updated_at);
+                }
+            }
+        }
+        SecretsAction::Delete { name } => {
+            if store.delete(&name)? {
+                println!("secret {name:?} deleted");
+            } else {
+                eprintln!("no such secret {name:?}");
+                std::process::exit(1);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reads a secret value from stdin, stripping a single trailing newline
+/// (`\n` or `\r\n`) so a piped `echo` doesn't smuggle one into the value.
+fn read_secret_from_stdin() -> std::io::Result<String> {
+    use std::io::Read as _;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+    if let Some(stripped) = buf.strip_suffix('\n') {
+        buf.truncate(stripped.len());
+        if let Some(stripped) = buf.strip_suffix('\r') {
+            buf.truncate(stripped.len());
+        }
+    }
+    Ok(buf)
 }

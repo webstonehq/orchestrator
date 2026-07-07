@@ -186,7 +186,9 @@ impl RunSink for RemoteSink {
         status: &str,
         attempt: i64,
     ) -> DbResult<i64> {
-        let id = self.inner.upsert_task_run(run_id, task_id, status, attempt)?;
+        let id = self
+            .inner
+            .upsert_task_run(run_id, task_id, status, attempt)?;
         self.task_names
             .lock()
             .expect("task_names poisoned")

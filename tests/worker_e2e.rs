@@ -145,7 +145,10 @@ async fn worker_claims_executes_and_reports_gpu_run() {
 
     // The task output made it back to the server's database.
     let tasks = srv.db.list_task_runs(run_id).unwrap();
-    let fetch = tasks.iter().find(|t| t.task_id == "fetch").expect("fetch task");
+    let fetch = tasks
+        .iter()
+        .find(|t| t.task_id == "fetch")
+        .expect("fetch task");
     assert_eq!(fetch.status, "success");
     let outputs: Value = serde_json::from_str(fetch.outputs.as_deref().unwrap()).unwrap();
     assert_eq!(outputs["ids"], json!([7, 8, 9]));

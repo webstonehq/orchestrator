@@ -141,6 +141,11 @@
 					>{'{{ secrets.NAME }}'}</code
 				> in any task field.
 			</p>
+			<p class="page-note">
+				These serve runs the server executes (the <code class="snippet">local</code> queue). Runs on a
+				worker queue resolve against that worker's own store — set those on the worker box with
+				<code class="snippet">orchestrator secrets set</code>.
+			</p>
 		</div>
 		{#if secrets.length > 0}
 			<button type="button" class="btn-accent" onclick={openAdd}>+ Add secret</button>
@@ -315,6 +320,14 @@
 
 	.head-row .page-desc {
 		margin-bottom: 0;
+	}
+
+	.page-note {
+		margin: 8px 0 0;
+		max-width: 60ch;
+		font-size: 12.5px;
+		line-height: 1.5;
+		color: var(--dim);
 	}
 
 	.snippet {

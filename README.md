@@ -236,6 +236,24 @@ master key auto-generated at `~/.orchestrator/master.key` (0600) on first
 run. Secrets resolve at execution time only and are redacted (`***`) from
 logs and stored task results.
 
+The UI and API manage the **server's** store, which serves `local`-queue runs
+(those the server executes itself). Runs on a worker queue resolve secrets
+against the **worker's own** store instead — populate that from the CLI on the
+worker box (see [BYOW](#bring-your-own-worker-byow)). `orchestrator secrets`
+also works against the server's store when it isn't running:
+
+```sh
+# Defaults to the worker store (~/.orchestrator/worker.{db,key}).
+orchestrator secrets set API_TOKEN                 # prompts via stdin (no shell history)
+echo -n "$TOKEN" | orchestrator secrets set API_TOKEN
+orchestrator secrets list
+orchestrator secrets delete API_TOKEN
+
+# Point at another store, e.g. the server's while it's stopped:
+orchestrator secrets --db ~/.orchestrator/orchestrator.db \
+                     --key ~/.orchestrator/master.key list
+```
+
 ## Writing a plugin
 
 A task type is a plugin: one Rust module contributing both execution code and
@@ -355,6 +373,17 @@ orchestrator serve --worker-token s3cret
 orchestrator worker --server http://server:4400 --token s3cret --queues gpu
 ```
 
+Because a worker resolves `{{ secrets.NAME }}` against its **own** store,
+populate that store on the worker box before running flows that need secrets —
+the server never ships them over. Use `orchestrator secrets` (it defaults to
+the worker store, `~/.orchestrator/worker.{db,key}`):
+
+```sh
+# On the GPU box, before/while the worker runs:
+echo -n "$HF_TOKEN" | orchestrator secrets set HF_TOKEN
+orchestrator secrets list
+```
+
 The worker pulls queued `gpu` runs, executes them, and streams status, results,
 and logs back — the live run view works identically whether a run executes on
 the server or a worker. Runs on unserved queues wait, visibly `queued`, until a
@@ -365,7 +394,9 @@ inbound reachability and work fine behind NAT. See
 
 `orchestrator worker` flags: `--server`, `--token` (or `ORCH_WORKER_TOKEN`),
 `--id`, `--queues` (comma-separated, default `default`), `--capacity`, `--db`
-(scratch), `--key` (the worker's own secrets key).
+(scratch), `--key` (the worker's own secrets key). Populate that key's store
+with `orchestrator secrets set NAME` (and `list` / `delete`) — it targets
+`--db`/`--key`, defaulting to the same worker paths.
 
 ## Security notes
 

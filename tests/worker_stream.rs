@@ -52,10 +52,9 @@ fn save_flow(db: &Db, id: &str, def: &Value) {
 async fn run_and_capture(flow_id: &str, def: Value) -> (Db, Vec<RunUpdate>) {
     let s = scratch();
     save_flow(&s.db, flow_id, &def);
-    let run_id = s
-        .db
-        .insert_run(flow_id, 1, "manual", "{}", "gpu", None)
-        .expect("insert run");
+    let run_id =
+        s.db.insert_run(flow_id, 1, "manual", "{}", "gpu", None)
+            .expect("insert run");
     let run = s.db.get_run(run_id).unwrap().unwrap();
 
     let (btx, _brx) = broadcast::channel::<RunEvent>(1024);
@@ -196,7 +195,10 @@ async fn stream_reproduces_fanout_items() {
     let (local_db, updates) = run_and_capture("fan", def.clone()).await;
     let (_dir, server_db, srv_run) = apply_to_server("fan", &def, &updates);
 
-    assert_eq!(server_db.get_run(srv_run).unwrap().unwrap().status, "success");
+    assert_eq!(
+        server_db.get_run(srv_run).unwrap().unwrap().status,
+        "success"
+    );
 
     // The parallel task's items were reproduced with matching statuses.
     let local_tr = &local_db.list_task_runs(1).unwrap()[0];

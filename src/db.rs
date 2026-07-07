@@ -168,11 +168,7 @@ ALTER TABLE runs ADD COLUMN last_seq INTEGER NOT NULL DEFAULT 0;
 "#;
 
 /// Embedded migrations, applied in order; versions recorded in `migrations`.
-const MIGRATIONS: &[(i64, &str)] = &[
-    (1, MIGRATION_001),
-    (2, MIGRATION_002),
-    (3, MIGRATION_003),
-];
+const MIGRATIONS: &[(i64, &str)] = &[(1, MIGRATION_001), (2, MIGRATION_002), (3, MIGRATION_003)];
 
 // ---------------------------------------------------------------------------
 // Row types
@@ -566,7 +562,14 @@ impl Db {
         conn.execute(
             "INSERT INTO runs (flow_id, flow_rev, status, trigger, inputs, queue, scheduled_for) \
              VALUES (?1, ?2, 'queued', ?3, ?4, ?5, ?6)",
-            params![flow_id, flow_rev, trigger, inputs_json, queue, scheduled_for],
+            params![
+                flow_id,
+                flow_rev,
+                trigger,
+                inputs_json,
+                queue,
+                scheduled_for
+            ],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -726,12 +729,7 @@ impl Db {
     /// Extend the lease deadline of `worker_id`'s active runs to
     /// `now + lease_secs`. Only rows still `leased`/`running` and owned by
     /// this worker are touched. Returns the number of rows renewed.
-    pub fn renew_leases(
-        &self,
-        worker_id: &str,
-        run_ids: &[i64],
-        lease_secs: i64,
-    ) -> DbResult<u64> {
+    pub fn renew_leases(&self, worker_id: &str, run_ids: &[i64], lease_secs: i64) -> DbResult<u64> {
         if run_ids.is_empty() {
             return Ok(0);
         }

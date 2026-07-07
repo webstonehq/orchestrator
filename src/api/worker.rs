@@ -47,9 +47,7 @@ struct WorkersResponse {
     workers: Vec<crate::engine::WorkerStatus>,
 }
 
-async fn workers_status(
-    State(state): State<AppState>,
-) -> Result<Json<WorkersResponse>, ApiError> {
+async fn workers_status(State(state): State<AppState>) -> Result<Json<WorkersResponse>, ApiError> {
     let workers = state.engine.worker_statuses().map_err(ApiError::internal)?;
     Ok(Json(WorkersResponse {
         enabled: !state.worker_tokens.is_empty(),
