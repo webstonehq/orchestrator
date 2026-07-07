@@ -51,6 +51,9 @@ pub struct FlowDefinition {
 
 /// A declared run input, referenced as `{{ inputs.<id> }}`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+// Inline (no `$ref`) so nested enum/field values reach the YAML editor's value
+// autocomplete, which can't resolve `$ref`s. See `model::schema`.
+#[schemars(inline)]
 #[serde(deny_unknown_fields)]
 pub struct InputDef {
     /// Input id (`[a-z][a-z0-9_]*`).
@@ -70,6 +73,7 @@ pub struct InputDef {
 /// Value type of an input or a task output. Serialized UPPERCASE
 /// (`"STRING"`, `"ARRAY"`, ...).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[schemars(inline)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum InputType {
     /// Plain string.
@@ -88,6 +92,7 @@ pub enum InputType {
 
 /// A flow-scoped constant, referenced as `{{ vars.<id> }}`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(inline)]
 #[serde(deny_unknown_fields)]
 pub struct VarDef {
     /// Variable id (`[a-z][a-z0-9_]*`).
@@ -98,6 +103,7 @@ pub struct VarDef {
 
 /// A schedule trigger (`type: "schedule"` is the only kind in v1).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(inline)]
 #[serde(deny_unknown_fields)]
 pub struct TriggerDef {
     /// Trigger id (`[a-z][a-z0-9_]*`).
@@ -122,6 +128,7 @@ pub struct TriggerDef {
 #[derive(
     Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, schemars::JsonSchema,
 )]
+#[schemars(inline)]
 #[serde(rename_all = "lowercase")]
 pub enum Catchup {
     /// Skip everything missed.
@@ -174,6 +181,7 @@ pub struct PluginTask {
 /// Exponential-backoff retry policy (`type: "exponential"` is the only kind
 /// in v1). Attempt *n* sleeps `base_seconds * 2^(n-1)` before retrying.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[schemars(inline)]
 #[serde(deny_unknown_fields)]
 pub struct RetryPolicy {
     /// Policy kind; must be `"exponential"`.
@@ -190,6 +198,7 @@ pub struct RetryPolicy {
 #[derive(
     Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, schemars::JsonSchema,
 )]
+#[schemars(inline)]
 #[serde(rename_all = "lowercase")]
 pub enum OnError {
     /// Fail the whole run (the default).
@@ -202,6 +211,7 @@ pub enum OnError {
 /// A named value extracted from a task's result, referenced downstream as
 /// `{{ outputs.<task>.<name> }}`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[schemars(inline)]
 #[serde(deny_unknown_fields)]
 pub struct OutputDef {
     /// Output name (`[a-z][a-z0-9_]*`), unique per task.

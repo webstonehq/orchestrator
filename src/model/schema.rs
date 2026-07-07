@@ -314,6 +314,63 @@ mod tests {
 
     // -- full assembly --------------------------------------------------------
 
+    /// The closed set of values a schema node allows, whether expressed as a
+    /// flat `enum` array or (schemars' shape for documented enums) a `oneOf` of
+    /// `const`s. Empty when the node isn't a closed value set — which is also
+    /// what happens if the node is an unresolved `$ref`, the exact case that
+    /// breaks value autocomplete.
+    fn value_set(node: &Value) -> Vec<String> {
+        if let Some(values) = node.get("enum").and_then(Value::as_array) {
+            return values.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+        }
+        if let Some(branches) = node.get("oneOf").and_then(Value::as_array) {
+            return branches
+                .iter()
+                .filter_map(|b| b.get("const").and_then(Value::as_str).map(String::from))
+                .collect();
+        }
+        Vec::new()
+    }
+
+    #[test]
+    fn catchup_values_are_inline_for_completion() {
+        // `codemirror-json-schema` can't resolve `$ref`s when proposing values,
+        // so enum-typed properties must carry their values inline at the use
+        // site — here, a trigger's `catchup`.
+        let s = flow_json_schema(&PluginRegistry::builtin());
+        let catchup = &s["properties"]["triggers"]["items"]["properties"]["catchup"];
+        let mut values = value_set(catchup);
+        values.sort();
+        assert_eq!(values, vec!["all", "latest", "none"]);
+    }
+
+    #[test]
+    fn input_type_values_are_inline_for_completion() {
+        let s = flow_json_schema(&PluginRegistry::builtin());
+        let ty = &s["properties"]["inputs"]["items"]["properties"]["type"];
+        let mut values = value_set(ty);
+        values.sort();
+        assert_eq!(values, vec!["ARRAY", "BOOLEAN", "DATE", "INT", "JSON", "STRING"]);
+    }
+
+    #[test]
+    fn on_error_values_are_inline_for_completion() {
+        let s = flow_json_schema(&PluginRegistry::builtin());
+        let http = task_branch(&s, "http.request").expect("http.request branch");
+        let mut values = value_set(&http["properties"]["on_error"]);
+        values.sort();
+        assert_eq!(values, vec!["continue", "fail"]);
+    }
+
+    #[test]
+    fn select_config_values_are_inline_for_completion() {
+        // Config Select fields are emitted inline already; guard that path too.
+        let s = flow_json_schema(&PluginRegistry::builtin());
+        let http = task_branch(&s, "http.request").expect("http.request branch");
+        let method = &http["properties"]["config"]["properties"]["method"];
+        assert!(value_set(method).contains(&"GET".to_string()));
+    }
+
     /// Find the `oneOf` task branch whose discriminating `type` const is `id`.
     fn task_branch<'a>(schema: &'a Value, id: &str) -> Option<&'a Value> {
         schema["$defs"]["Task"]["oneOf"]

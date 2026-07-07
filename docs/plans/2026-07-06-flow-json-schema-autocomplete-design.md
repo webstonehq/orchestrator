@@ -103,6 +103,23 @@ Rules:
   whose manifest doesn't fully enumerate its config never produces false
   errors.
 
+## Value autocomplete (enums) — the `$ref` gotcha
+
+Autocomplete of *values* (e.g. `catchup: none|latest|all`, input `type`,
+`on_error`, config `method`) needs the enum values to sit **inline** at the
+property. `codemirror-json-schema`'s value-completion path
+(`addSchemaValueCompletions`) does not resolve `$ref`s, so an enum emitted as
+`{ "$ref": "#/$defs/Catchup" }` yields no value suggestions even though it
+validates fine.
+
+Fix: mark the derived leaf types (`InputDef`, `InputType`, `VarDef`,
+`TriggerDef`, `Catchup`, `RetryPolicy`, `OnError`, `OutputDef`) with
+`#[schemars(inline)]` so schemars inlines them at every use site. The root
+`FlowDefinition` and the recursive `TaskDef` stay referenced (`TaskDef` must —
+it's self-referential and injected at runtime). Config `Select` fields are
+already inline (built by hand in `field_to_schema`). Guarded by
+`*_values_are_inline_for_completion` tests in `model::schema`.
+
 ## Frontend wiring
 
 - Add `codemirror-json-schema` to `ui/package.json`.
