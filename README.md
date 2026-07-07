@@ -109,6 +109,8 @@ image, so flows work out of the box.
 
 ### Deploy to Railway (or similar)
 
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/RampBj?referralCode=oPc0Nv&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
 Point the platform at the published image
 `ghcr.io/webstonehq/orchestrator:latest`, attach a persistent volume mounted at
 `/data`, and let it bind `$PORT` (the image reads it, defaulting to `4400`).

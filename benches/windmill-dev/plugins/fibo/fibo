@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+# Benchmark workload plugin: compute the nth Fibonacci number with naive
+# recursion — the identical function the Windmill benchmark uses, so per-task
+# execution cost matches across engines. Oneshot lifecycle: the engine spawns
+# this fresh per task (like Kestra's Process runner), so bench_40 measures
+# per-task spawn/dispatch overhead and bench_10 measures execution cost.
+import json
+import sys
+
+
+def fibo(n):
+    if n <= 1:
+        return n
+    return fibo(n - 1) + fibo(n - 2)
+
+
+def emit(obj):
+    print(json.dumps(obj), flush=True)
+
+
+req = json.load(sys.stdin)
+cfg = req.get("config", {})
+n = int(cfg.get("n", 0))
+emit({"type": "log", "level": "info", "message": f"fibo({n})"})
+emit({"type": "result", "value": {"n": n, "result": fibo(n)}})

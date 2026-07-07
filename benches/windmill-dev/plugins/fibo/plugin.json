@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "fibo",
+  "version": "0.1.0",
+  "entrypoint": "fibo",
+  "lifecycle": "oneshot",
+  "supports_validate": false,
+  "manifest": {
+    "type_id": "bench.fibo",
+    "label": "Fibonacci (benchmark)",
+    "description": "Compute the nth Fibonacci number by naive recursion — benchmark workload",
+    "icon": "hash",
+    "color": "#2563eb",
+    "fields": [
+      { "key": "n", "label": "n", "widget": "number", "required": true }
+    ]
+  }
+}

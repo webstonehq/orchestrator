@@ -1,0 +1,128 @@
+id: bench_40
+name: bench-40
+namespace: bench
+description: "40 sequential lightweight tasks: fibo(10)"
+inputs: []
+variables: []
+triggers: []
+tasks:
+- id: t00
+  type: bench.fibo
+  config: { n: 10 }
+- id: t01
+  type: bench.fibo
+  config: { n: 10 }
+- id: t02
+  type: bench.fibo
+  config: { n: 10 }
+- id: t03
+  type: bench.fibo
+  config: { n: 10 }
+- id: t04
+  type: bench.fibo
+  config: { n: 10 }
+- id: t05
+  type: bench.fibo
+  config: { n: 10 }
+- id: t06
+  type: bench.fibo
+  config: { n: 10 }
+- id: t07
+  type: bench.fibo
+  config: { n: 10 }
+- id: t08
+  type: bench.fibo
+  config: { n: 10 }
+- id: t09
+  type: bench.fibo
+  config: { n: 10 }
+- id: t10
+  type: bench.fibo
+  config: { n: 10 }
+- id: t11
+  type: bench.fibo
+  config: { n: 10 }
+- id: t12
+  type: bench.fibo
+  config: { n: 10 }
+- id: t13
+  type: bench.fibo
+  config: { n: 10 }
+- id: t14
+  type: bench.fibo
+  config: { n: 10 }
+- id: t15
+  type: bench.fibo
+  config: { n: 10 }
+- id: t16
+  type: bench.fibo
+  config: { n: 10 }
+- id: t17
+  type: bench.fibo
+  config: { n: 10 }
+- id: t18
+  type: bench.fibo
+  config: { n: 10 }
+- id: t19
+  type: bench.fibo
+  config: { n: 10 }
+- id: t20
+  type: bench.fibo
+  config: { n: 10 }
+- id: t21
+  type: bench.fibo
+  config: { n: 10 }
+- id: t22
+  type: bench.fibo
+  config: { n: 10 }
+- id: t23
+  type: bench.fibo
+  config: { n: 10 }
+- id: t24
+  type: bench.fibo
+  config: { n: 10 }
+- id: t25
+  type: bench.fibo
+  config: { n: 10 }
+- id: t26
+  type: bench.fibo
+  config: { n: 10 }
+- id: t27
+  type: bench.fibo
+  config: { n: 10 }
+- id: t28
+  type: bench.fibo
+  config: { n: 10 }
+- id: t29
+  type: bench.fibo
+  config: { n: 10 }
+- id: t30
+  type: bench.fibo
+  config: { n: 10 }
+- id: t31
+  type: bench.fibo
+  config: { n: 10 }
+- id: t32
+  type: bench.fibo
+  config: { n: 10 }
+- id: t33
+  type: bench.fibo
+  config: { n: 10 }
+- id: t34
+  type: bench.fibo
+  config: { n: 10 }
+- id: t35
+  type: bench.fibo
+  config: { n: 10 }
+- id: t36
+  type: bench.fibo
+  config: { n: 10 }
+- id: t37
+  type: bench.fibo
+  config: { n: 10 }
+- id: t38
+  type: bench.fibo
+  config: { n: 10 }
+- id: t39
+  type: bench.fibo
+  config: { n: 10 }

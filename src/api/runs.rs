@@ -91,6 +91,7 @@ struct TaskRunView {
     result: Option<Value>,
     outputs: Option<Value>,
     error: Option<String>,
+    created_at: Option<String>,
     started_at: Option<String>,
     finished_at: Option<String>,
 }
@@ -295,6 +296,7 @@ fn build_run_detail(state: &AppState, id: i64, include_result: bool) -> Result<V
                 .then(|| t.result.as_deref().map(parse_json).unwrap_or(Value::Null)),
             outputs: t.outputs.as_deref().map(parse_json),
             error: t.error.clone(),
+            created_at: t.created_at.clone(),
             started_at: t.started_at.clone(),
             finished_at: t.finished_at.clone(),
         })

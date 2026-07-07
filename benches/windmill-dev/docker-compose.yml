@@ -1,0 +1,24 @@
+# Spin up Orchestrator for the benchmark, mirroring the Windmill methodology
+# (docker-compose to launch the orchestrator). Builds a thin image that adds
+# python3 + the fibo plugin on top of the published Orchestrator image.
+#
+#   docker compose up --build -d
+#   ./run_bench.sh bench_10
+#   ./run_bench.sh bench_40
+#   docker compose down -v
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: orchestrator-bench:latest
+    ports:
+      - "4400:4400"
+    environment:
+      # Quiet logging so the benchmark isn't measuring log I/O.
+      - RUST_LOG=warn
+    volumes:
+      - bench-data:/data
+
+volumes:
+  bench-data:

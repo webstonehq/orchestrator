@@ -1,0 +1,38 @@
+id: bench_10
+name: bench-10
+namespace: bench
+description: "10 sequential long-running tasks: fibo(33)"
+inputs: []
+variables: []
+triggers: []
+tasks:
+- id: t00
+  type: bench.fibo
+  config: { n: 33 }
+- id: t01
+  type: bench.fibo
+  config: { n: 33 }
+- id: t02
+  type: bench.fibo
+  config: { n: 33 }
+- id: t03
+  type: bench.fibo
+  config: { n: 33 }
+- id: t04
+  type: bench.fibo
+  config: { n: 33 }
+- id: t05
+  type: bench.fibo
+  config: { n: 33 }
+- id: t06
+  type: bench.fibo
+  config: { n: 33 }
+- id: t07
+  type: bench.fibo
+  config: { n: 33 }
+- id: t08
+  type: bench.fibo
+  config: { n: 33 }
+- id: t09
+  type: bench.fibo
+  config: { n: 33 }

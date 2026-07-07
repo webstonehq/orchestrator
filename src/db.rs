@@ -1,9 +1,9 @@
 //! SQLite connection pool and schema migrations.
 //!
 //! Wraps an r2d2 pool over rusqlite with per-connection pragmas
-//! (`journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=5000`), an embedded
-//! migration runner, and typed query helpers used by the engine, scheduler,
-//! and API layers.
+//! (`journal_mode=WAL`, `synchronous=NORMAL`, `foreign_keys=ON`,
+//! `busy_timeout=5000`), an embedded migration runner, and typed query helpers
+//! used by the engine, scheduler, and API layers.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -167,8 +167,22 @@ ALTER TABLE runs ADD COLUMN lease_expires_at TEXT;
 ALTER TABLE runs ADD COLUMN last_seq INTEGER NOT NULL DEFAULT 0;
 "#;
 
+/// Adds `created_at` to task_runs: when the task run row was first created
+/// (enqueued), stamped ahead of `started_at` (when it began running). The gap
+/// is the task's assignment/queue latency — the metric the Windmill benchmark
+/// reports. Backfilled for pre-existing rows from the best timestamp available.
+const MIGRATION_004: &str = r#"
+ALTER TABLE task_runs ADD COLUMN created_at TEXT;
+UPDATE task_runs SET created_at = COALESCE(started_at, finished_at);
+"#;
+
 /// Embedded migrations, applied in order; versions recorded in `migrations`.
-const MIGRATIONS: &[(i64, &str)] = &[(1, MIGRATION_001), (2, MIGRATION_002), (3, MIGRATION_003)];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, MIGRATION_001),
+    (2, MIGRATION_002),
+    (3, MIGRATION_003),
+    (4, MIGRATION_004),
+];
 
 // ---------------------------------------------------------------------------
 // Row types
@@ -236,6 +250,9 @@ pub struct TaskRunRow {
     pub result: Option<String>,
     pub outputs: Option<String>,
     pub error: Option<String>,
+    /// When the task run row was first created (enqueued); stamped ahead of
+    /// `started_at`. The `created_at` → `started_at` gap is assignment latency.
+    pub created_at: Option<String>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
 }
@@ -382,6 +399,15 @@ impl Db {
             // concurrent pool connections race it on first-ever startup.
             conn.busy_timeout(Duration::from_millis(5000))?;
             conn.pragma_update(None, "journal_mode", "WAL")?;
+            // synchronous=NORMAL under WAL: commits append to the WAL without an
+            // fsync, which only happens at checkpoint. This is the single
+            // biggest write-throughput lever (no per-commit fsync), and it is
+            // safe here — a power/OS crash can lose transactions committed since
+            // the last checkpoint but never corrupts the database, and runs
+            // in-flight at an unclean shutdown are already marked failed
+            // ("interrupted") on the next startup (see `mark_interrupted`), so
+            // losing their last few status writes changes nothing observable.
+            conn.pragma_update(None, "synchronous", "NORMAL")?;
             conn.pragma_update(None, "foreign_keys", "ON")?;
             Ok(())
         });
@@ -833,14 +859,17 @@ impl Db {
         attempt: i64,
     ) -> DbResult<i64> {
         let conn = self.conn()?;
-        let started_at = (status == "running").then(now_rfc3339);
+        let now = now_rfc3339();
+        let started_at = (status == "running").then(|| now.clone());
+        // `created_at` is set on the first insert and never overwritten (it is
+        // absent from the ON CONFLICT SET clause, so it is preserved on update).
         conn.execute(
-            "INSERT INTO task_runs (run_id, task_id, status, attempt, started_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5) \
+            "INSERT INTO task_runs (run_id, task_id, status, attempt, created_at, started_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
              ON CONFLICT (run_id, task_id) DO UPDATE SET \
                status = excluded.status, attempt = excluded.attempt, \
                started_at = COALESCE(task_runs.started_at, excluded.started_at)",
-            params![run_id, task_id, status, attempt, started_at],
+            params![run_id, task_id, status, attempt, now, started_at],
         )?;
         let id = conn.query_row(
             "SELECT id FROM task_runs WHERE run_id = ?1 AND task_id = ?2",
@@ -894,7 +923,7 @@ impl Db {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, run_id, task_id, status, attempt, result, outputs, error, \
-             started_at, finished_at FROM task_runs WHERE run_id = ?1 ORDER BY id",
+             created_at, started_at, finished_at FROM task_runs WHERE run_id = ?1 ORDER BY id",
         )?;
         let rows = stmt
             .query_map([run_id], map_task_run)?
@@ -1413,8 +1442,9 @@ fn map_task_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRunRow> {
         result: r.get(5)?,
         outputs: r.get(6)?,
         error: r.get(7)?,
-        started_at: r.get(8)?,
-        finished_at: r.get(9)?,
+        created_at: r.get(8)?,
+        started_at: r.get(9)?,
+        finished_at: r.get(10)?,
     })
 }
 

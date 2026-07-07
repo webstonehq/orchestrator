@@ -11,6 +11,21 @@ fn open_temp() -> (tempfile::TempDir, Db) {
     (dir, db)
 }
 
+#[test]
+fn pragmas_are_applied_on_open() {
+    let (_dir, db) = open_temp();
+    let conn = db.conn().expect("conn");
+    let journal: String = conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .expect("journal_mode");
+    // synchronous: 0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA
+    let synchronous: i64 = conn
+        .query_row("PRAGMA synchronous", [], |r| r.get(0))
+        .expect("synchronous");
+    assert_eq!(journal.to_lowercase(), "wal");
+    assert_eq!(synchronous, 1, "synchronous should be NORMAL under WAL");
+}
+
 fn ago_hours(h: i64) -> String {
     (chrono::Utc::now() - chrono::Duration::hours(h))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -294,6 +309,8 @@ fn task_run_upsert_finish_and_list() {
     let first = &db.list_task_runs(run_id).unwrap()[0];
     let started = first.started_at.clone();
     assert!(started.is_some(), "running task gets started_at");
+    let created = first.created_at.clone();
+    assert!(created.is_some(), "task run gets created_at on first insert");
     assert_eq!(first.attempt, 1);
 
     // Retry bumps attempt, keeps the same row and original started_at.
@@ -305,6 +322,7 @@ fn task_run_upsert_finish_and_list() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].attempt, 2);
     assert_eq!(rows[0].started_at, started);
+    assert_eq!(rows[0].created_at, created, "created_at is never overwritten");
 
     db.finish_task_run(
         run_id,
@@ -331,6 +349,10 @@ fn task_run_upsert_finish_and_list() {
     assert!(
         rows[1].started_at.is_none(),
         "pending task has no started_at"
+    );
+    assert!(
+        rows[1].created_at.is_some(),
+        "pending task still gets created_at ahead of started_at"
     );
 }
 
