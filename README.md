@@ -97,10 +97,12 @@ image, so flows work out of the box.
   (the container's `HOME`). Mount a volume there (as above) to persist flows,
   runs, and secrets across restarts; the master key is generated on first run,
   so keep the volume to keep your secrets decryptable.
-- **Listen address** — the image runs `serve --listen 0.0.0.0:4400` so the UI is
-  reachable from outside the container. Orchestrator has **no built-in auth**
-  (see [Security notes](#security-notes)) — only expose it behind an
-  authenticating reverse proxy or on a trusted network.
+- **Listen address** — the image binds `0.0.0.0:$PORT` (`PORT` defaults to
+  `4400`), so the UI is reachable from outside the container and drops onto
+  whatever port a platform router injects. Override with `-e PORT=…` or
+  `serve --listen …`. Orchestrator has **no built-in auth** (see
+  [Security notes](#security-notes)) — only expose it behind an authenticating
+  reverse proxy or on a trusted network.
 - **Other subcommands** — the binary is the entrypoint, so override the default
   command to run a worker or manage secrets, e.g.
   `docker run ... ghcr.io/webstonehq/orchestrator:latest worker --server … --token …`.
@@ -108,9 +110,14 @@ image, so flows work out of the box.
 ### Deploy to Railway (or similar)
 
 Point the platform at the published image
-`ghcr.io/webstonehq/orchestrator:latest`, expose port `4400`, and attach a
-persistent volume mounted at `/data`. That's enough to boot; put an
-authenticating proxy in front before exposing it publicly.
+`ghcr.io/webstonehq/orchestrator:latest`, attach a persistent volume mounted at
+`/data`, and let it bind `$PORT` (the image reads it, defaulting to `4400`).
+That's enough to boot; put an authenticating proxy in front before exposing it
+publicly.
+
+For **Railway** specifically — including the one-click template, the
+`RAILWAY_RUN_UID=0` setting needed so the non-root image can write the volume,
+and the `/api/health` healthcheck — see **[docs/railway.md](docs/railway.md)**.
 
 Building the image yourself instead:
 
