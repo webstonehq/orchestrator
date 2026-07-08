@@ -6,7 +6,7 @@
 // Wire types (mirror the Rust API contract)
 // ---------------------------------------------------------------------------
 
-export type RunStatus = 'queued' | 'running' | 'success' | 'failed' | 'canceled';
+export type RunStatus = 'queued' | 'running' | 'success' | 'degraded' | 'failed' | 'canceled';
 export type TaskStatus = 'pending' | 'running' | 'success' | 'failed' | 'canceled' | 'skipped';
 export type ItemStatus = 'queued' | 'running' | 'success' | 'failed' | 'canceled' | 'dropped';
 export type LogLevel = 'INFO' | 'OK' | 'WARN' | 'ERR' | 'DBG';
@@ -160,7 +160,7 @@ export interface ValidationIssue {
 
 export interface Dashboard {
 	active_flows: number;
-	runs_24h: { total: number; ok: number; failed: number; running: number };
+	runs_24h: { total: number; ok: number; degraded: number; failed: number; running: number };
 	success_rate_30d: number | null;
 	avg_duration_sec: number | null;
 	next_scheduled: { flow_id: string; at: string } | null;
@@ -189,6 +189,7 @@ export interface RunCounts {
 	all: number;
 	running: number;
 	success: number;
+	degraded: number;
 	failed: number;
 	queued: number;
 	canceled: number;

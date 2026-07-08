@@ -219,6 +219,9 @@ pub(crate) async fn execute_run(
 
     let mut run_error: Option<String> = None;
     let mut canceled = false;
+    // A task failed but was configured `on_error: continue`. If no fatal
+    // failure occurs, the run finishes `degraded` rather than `success`.
+    let mut degraded = false;
 
     for task in &def.tasks {
         if canceled {
@@ -301,11 +304,14 @@ pub(crate) async fn execute_run(
                 scope.log(LogLevel::Err, &task.id, &error);
                 match on_error {
                     OnError::Fail => run_error = Some(format!("task {}: {error}", task.id)),
-                    OnError::Continue => scope.log(
-                        LogLevel::Warn,
-                        "flow",
-                        &format!("task {} failed; continuing (on_error=continue)", task.id),
-                    ),
+                    OnError::Continue => {
+                        degraded = true;
+                        scope.log(
+                            LogLevel::Warn,
+                            "flow",
+                            &format!("task {} failed; continuing (on_error=continue)", task.id),
+                        );
+                    }
                 }
             }
             TaskOutcome::Canceled => {
@@ -367,6 +373,32 @@ pub(crate) async fn execute_run(
             &format!("execution #{run_id} failed: {error}"),
         );
         scope.send_run("failed", Some(now), Some(error));
+    } else if degraded {
+        // Every fatal task passed, but at least one `on_error: continue` task
+        // failed: the run finished its critical path but is not a clean
+        // success. Distinct from `success` so it surfaces in filters/metrics;
+        // the failing task_run rows carry the actual errors.
+        db_try(
+            run_id,
+            scope.sink.update_run_status(
+                run_id,
+                RunStatusUpdate {
+                    status: "degraded",
+                    error: None,
+                    started_at: None,
+                    finished_at: Some(&now),
+                },
+            ),
+        );
+        scope.log(
+            LogLevel::Warn,
+            "flow",
+            &format!(
+                "execution #{run_id} completed with errors (degraded) in {:.1}s",
+                started.elapsed().as_secs_f64()
+            ),
+        );
+        scope.send_run("degraded", Some(now), None);
     } else {
         db_try(
             run_id,

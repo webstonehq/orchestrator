@@ -194,7 +194,7 @@ async fn run_list_filters_pagination_and_counts() {
     assert_eq!(body["total"], json!(4));
     assert_eq!(
         body["counts"],
-        json!({"all": 4, "running": 1, "success": 1, "failed": 1, "queued": 1, "canceled": 0})
+        json!({"all": 4, "running": 1, "success": 1, "degraded": 0, "failed": 1, "queued": 1, "canceled": 0})
     );
     let runs = body["runs"].as_array().unwrap();
     assert_eq!(runs.len(), 4);

@@ -23,7 +23,8 @@ use crate::db::ItemAggregates;
 #[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum RunEvent {
-    /// The run changed status (`running`, `success`, `failed`, `canceled`).
+    /// The run changed status (`running`, `success`, `degraded`, `failed`,
+    /// `canceled`).
     Run {
         /// New run status.
         status: String,

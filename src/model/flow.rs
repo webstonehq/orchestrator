@@ -215,7 +215,8 @@ pub enum OnError {
     /// Fail the whole run (the default).
     #[default]
     Fail,
-    /// Record the failure and keep going.
+    /// Record the failure and keep going. If no fatal task fails, the run
+    /// finishes in the `degraded` status rather than `success`.
     Continue,
 }
 

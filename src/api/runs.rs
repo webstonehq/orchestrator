@@ -258,6 +258,7 @@ async fn list_runs(
         "all": by_status.values().sum::<u64>(),
         "running": count("running"),
         "success": count("success"),
+        "degraded": count("degraded"),
         "failed": count("failed"),
         "queued": count("queued"),
         "canceled": count("canceled"),

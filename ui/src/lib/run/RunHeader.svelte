@@ -48,12 +48,35 @@
 		color?: string;
 	}
 
+	// Task-level breakdown for the Progress card. A `failed` task in a
+	// `degraded` run is a non-fatal (on_error: continue) failure; in a `failed`
+	// run the fatal task is also `failed`, so we label by run status.
+	const taskStats = $derived.by(() => {
+		let succeeded = 0;
+		let failed = 0;
+		for (const t of detail.tasks) {
+			if (t.status === 'success') succeeded++;
+			else if (t.status === 'failed') failed++;
+		}
+		return { succeeded, failed };
+	});
+
 	const metrics: Metric[] = $derived.by(() => {
+		const degradedLabel = run.status === 'failed' ? 'failed' : 'degraded';
 		const out: Metric[] = [
 			{
 				label: 'Progress',
-				value: `${run.tasks_done} / ${run.tasks_total}`,
-				sub: 'tasks complete'
+				value: `${taskStats.succeeded} / ${run.tasks_total}`,
+				sub:
+					taskStats.failed > 0
+						? `${taskStats.failed} ${degradedLabel}`
+						: 'tasks succeeded',
+				color:
+					taskStats.failed > 0
+						? run.status === 'failed'
+							? 'var(--red)'
+							: 'var(--amber)'
+						: undefined
 			}
 		];
 		// One card per parallel fan-out (usually a single one).

@@ -18,6 +18,7 @@
 		['all', 'All'],
 		['running', 'Running'],
 		['success', 'Success'],
+		['degraded', 'Degraded'],
 		['failed', 'Failed'],
 		['queued', 'Queued'],
 		['canceled', 'Canceled']

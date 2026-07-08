@@ -50,11 +50,15 @@
 
 	const dash = $derived($dashboardStore.data);
 	const dashError = $derived($dashboardStore.error);
-	const runsSub = $derived(
-		dash
-			? `${dash.runs_24h.ok} ok · ${dash.runs_24h.failed} failed · ${dash.runs_24h.running} running`
-			: ''
-	);
+	const runsSub = $derived.by(() => {
+		if (!dash) return '';
+		const r = dash.runs_24h;
+		// Surface degraded only when present, to keep the common case terse.
+		const parts = [`${r.ok} ok`];
+		if (r.degraded > 0) parts.push(`${r.degraded} degraded`);
+		parts.push(`${r.failed} failed`, `${r.running} running`);
+		return parts.join(' · ');
+	});
 
 	function rateColor(rate: number): string {
 		if (rate >= 0.9) return 'var(--green)';

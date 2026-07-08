@@ -72,7 +72,10 @@ async fn wait_for_finish(env: &Env, run_id: i64) -> RunRow {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let run = env.db.get_run(run_id).expect("get run").expect("run row");
-        if matches!(run.status.as_str(), "success" | "failed" | "canceled") {
+        if matches!(
+            run.status.as_str(),
+            "success" | "degraded" | "failed" | "canceled"
+        ) {
             return run;
         }
         assert!(
@@ -213,6 +216,49 @@ async fn extraction_failure_fails_task_and_skips_downstream() {
             .contains("result.body.missing")
     );
     assert_eq!(task_run(&tasks, "t2").status, "skipped");
+}
+
+// ---------------------------------------------------------------------------
+// 2b. on_error: continue at the top level degrades the run (doesn't skip)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn top_level_on_error_continue_degrades_run() {
+    let env = new_env();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"other": 1})))
+        .mount(&server)
+        .await;
+
+    save_flow(
+        &env,
+        "degrade",
+        json!({
+            "name": "degrade",
+            "tasks": [
+                // t1 fails (extract path missing) but is non-fatal.
+                {"id": "t1", "type": "http.request", "on_error": "continue",
+                 "config": {"method": "GET", "url": server.uri()},
+                 "outputs": [{"name": "ids", "type": "ARRAY", "extract": "result.body.missing"}]},
+                // t2 still runs — a continue-failure must not skip downstream.
+                {"id": "t2", "type": "http.request",
+                 "config": {"method": "GET", "url": server.uri()}}
+            ]
+        }),
+    );
+
+    let run_id = create_run(&env, "degrade", json!({})).unwrap();
+    let run = start_and_wait(&env, run_id).await;
+    // The run finished its critical path but is not a clean success.
+    assert_eq!(run.status, "degraded");
+    // Degraded runs carry no run-level error; the failing task row does.
+    assert!(run.error.is_none());
+    assert!(run.finished_at.is_some());
+
+    let tasks = env.db.list_task_runs(run_id).unwrap();
+    assert_eq!(task_run(&tasks, "t1").status, "failed");
+    assert_eq!(task_run(&tasks, "t2").status, "success");
 }
 
 // ---------------------------------------------------------------------------

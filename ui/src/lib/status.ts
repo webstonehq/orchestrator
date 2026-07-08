@@ -2,6 +2,7 @@
 
 export type Status =
 	| 'success'
+	| 'degraded'
 	| 'running'
 	| 'failed'
 	| 'queued'
@@ -18,6 +19,9 @@ export interface StatusStyle {
 
 export const STATUS: Record<Status, StatusStyle> = {
 	success: { color: '#3fb950', bg: 'rgba(63,185,80,.12)', label: 'Success' },
+	// run finished but a task failed under on_error: continue — amber, like the
+	// item-level `dropped` it mirrors
+	degraded: { color: '#e3b341', bg: 'rgba(227,179,65,.12)', label: 'Degraded' },
 	running: { color: '#58a6ff', bg: 'rgba(88,166,255,.12)', label: 'Running' },
 	failed: { color: '#f85149', bg: 'rgba(248,81,73,.12)', label: 'Failed' },
 	queued: { color: '#e3b341', bg: 'rgba(227,179,65,.12)', label: 'Queued' },

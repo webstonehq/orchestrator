@@ -90,7 +90,7 @@ CREATE TABLE runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   flow_id TEXT NOT NULL,
   flow_rev INTEGER NOT NULL,
-  status TEXT NOT NULL,             -- queued|running|success|failed|canceled
+  status TEXT NOT NULL,             -- queued|running|success|degraded|failed|canceled
   trigger TEXT NOT NULL,            -- schedule|manual|api
   inputs TEXT NOT NULL,             -- JSON object
   scheduled_for TEXT,               -- cron occurrence covered (catch-up runs)
@@ -331,6 +331,7 @@ pub struct ScheduleRow {
 pub struct Runs24h {
     pub total: u64,
     pub ok: u64,
+    pub degraded: u64,
     pub failed: u64,
     pub running: u64,
 }
@@ -340,7 +341,8 @@ pub struct DashboardMetrics {
     /// Flows not paused.
     pub active_flows: u64,
     pub runs_24h: Runs24h,
-    /// success / (success + failed) over runs finished in the last 30 days;
+    /// success / (success + degraded + failed) over runs finished in the last
+    /// 30 days; `degraded` runs lower the rate without counting as successes.
     /// `None` when no runs finished in the window. Fraction in `0.0..=1.0`.
     pub success_rate_30d: Option<f64>,
     pub avg_duration_sec_30d: Option<f64>,
@@ -354,7 +356,8 @@ pub struct FlowRunStats {
     /// Status of the most recent run (by id), any status.
     pub last_run_status: Option<String>,
     pub last_run_finished_at: Option<String>,
-    /// success / (success + failed) over runs finished in the last 30 days;
+    /// success / (success + degraded + failed) over runs finished in the last
+    /// 30 days; `degraded` runs lower the rate without counting as successes.
     /// `None` when no runs finished in the window. Fraction in `0.0..=1.0`.
     pub success_rate_30d: Option<f64>,
     pub avg_duration_sec_30d: Option<f64>,
@@ -1381,6 +1384,7 @@ impl Db {
         let runs_24h = conn.query_row(
             "SELECT COUNT(*), \
                IFNULL(SUM(status = 'success'), 0), \
+               IFNULL(SUM(status = 'degraded'), 0), \
                IFNULL(SUM(status = 'failed'), 0), \
                IFNULL(SUM(status = 'running'), 0) \
              FROM runs \
@@ -1391,24 +1395,33 @@ impl Db {
                 Ok(Runs24h {
                     total: r.get::<_, i64>(0)? as u64,
                     ok: r.get::<_, i64>(1)? as u64,
-                    failed: r.get::<_, i64>(2)? as u64,
-                    running: r.get::<_, i64>(3)? as u64,
+                    degraded: r.get::<_, i64>(2)? as u64,
+                    failed: r.get::<_, i64>(3)? as u64,
+                    running: r.get::<_, i64>(4)? as u64,
                 })
             },
         )?;
 
-        let (success_30d, failed_30d, avg_duration_sec_30d): (i64, i64, Option<f64>) = conn
-            .query_row(
-                "SELECT IFNULL(SUM(status = 'success'), 0), \
-                   IFNULL(SUM(status = 'failed'), 0), \
-                   AVG(CASE WHEN started_at IS NOT NULL \
-                       THEN (julianday(finished_at) - julianday(started_at)) * 86400.0 END) \
-                 FROM runs WHERE status IN ('success', 'failed') \
-                   AND finished_at IS NOT NULL AND finished_at >= ?1",
-                [&cutoff_30d],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
-        let finished = success_30d + failed_30d;
+        // A `degraded` run finished but is not a clean success, so it counts
+        // toward the denominator (dragging the rate down) without being a
+        // success in the numerator.
+        let (success_30d, degraded_30d, failed_30d, avg_duration_sec_30d): (
+            i64,
+            i64,
+            i64,
+            Option<f64>,
+        ) = conn.query_row(
+            "SELECT IFNULL(SUM(status = 'success'), 0), \
+               IFNULL(SUM(status = 'degraded'), 0), \
+               IFNULL(SUM(status = 'failed'), 0), \
+               AVG(CASE WHEN started_at IS NOT NULL \
+                   THEN (julianday(finished_at) - julianday(started_at)) * 86400.0 END) \
+             FROM runs WHERE status IN ('success', 'degraded', 'failed') \
+               AND finished_at IS NOT NULL AND finished_at >= ?1",
+            [&cutoff_30d],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        let finished = success_30d + degraded_30d + failed_30d;
         let success_rate_30d = (finished > 0).then(|| success_30d as f64 / finished as f64);
 
         Ok(DashboardMetrics {
@@ -1452,10 +1465,11 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT flow_id, \
                IFNULL(SUM(status = 'success'), 0), \
+               IFNULL(SUM(status = 'degraded'), 0), \
                IFNULL(SUM(status = 'failed'), 0), \
                AVG(CASE WHEN started_at IS NOT NULL \
                    THEN (julianday(finished_at) - julianday(started_at)) * 86400.0 END) \
-             FROM runs WHERE status IN ('success', 'failed') \
+             FROM runs WHERE status IN ('success', 'degraded', 'failed') \
                AND finished_at IS NOT NULL AND finished_at >= ?1 \
              GROUP BY flow_id",
         )?;
@@ -1464,13 +1478,16 @@ impl Db {
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, i64>(2)?,
-                r.get::<_, Option<f64>>(3)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, Option<f64>>(4)?,
             ))
         })?;
         for row in rows {
-            let (flow_id, success, failed, avg_duration) = row?;
+            // `degraded` runs finished but are not clean successes: counted in
+            // the denominator, not the numerator (see `dashboard_metrics`).
+            let (flow_id, success, degraded, failed, avg_duration) = row?;
             let entry = stats.entry(flow_id).or_default();
-            let finished = success + failed;
+            let finished = success + degraded + failed;
             entry.success_rate_30d = (finished > 0).then(|| success as f64 / finished as f64);
             entry.avg_duration_sec_30d = avg_duration;
         }
