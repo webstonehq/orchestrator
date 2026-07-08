@@ -34,6 +34,7 @@ export function expressionGroups(def: FlowDefinition, secretNames: string[]): Pi
 	return pickerGroups({
 		inputs: def.inputs,
 		variables: def.variables,
+		envNames: def.env ?? [],
 		secretNames,
 		upstreamTasks
 	});

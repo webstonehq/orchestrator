@@ -117,6 +117,12 @@ export interface FlowDefinition {
 	description: string;
 	inputs: InputSpec[];
 	variables: VariableSpec[];
+	/**
+	 * Env var names the flow declares, referenced as `{{ env.<NAME> }}`.
+	 * Optional/absent when empty — the server skips it on serialize, so it is
+	 * omitted (never invented as `[]`) to keep wire round-trips lossless.
+	 */
+	env?: string[];
 	triggers: TriggerSpec[];
 	tasks: TaskSpec[];
 }

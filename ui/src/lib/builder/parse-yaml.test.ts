@@ -82,6 +82,19 @@ describe('yamlToDefinition — round-trip contract', () => {
 	it('round-trips a rich flow (parallel child, retry, headers, ARRAY default)', () => {
 		roundTrip('rich_flow', richDef);
 	});
+
+	it('round-trips declared env names', () => {
+		roundTrip('env_flow', {
+			name: 'env-flow',
+			namespace: 'default',
+			description: '',
+			inputs: [],
+			variables: [],
+			env: ['GITHUB_TOKEN', 'REGION'],
+			triggers: [],
+			tasks: []
+		});
+	});
 });
 
 describe('yamlToDefinition — scaffolded config matches canonical order (no blur churn)', () => {

@@ -34,7 +34,7 @@ export interface ParseResult {
 	errors: YamlProblem[];
 }
 
-const COLLECTION_FIELDS = ['inputs', 'variables', 'triggers', 'tasks'] as const;
+const COLLECTION_FIELDS = ['inputs', 'variables', 'env', 'triggers', 'tasks'] as const;
 
 /**
  * Parse editor text into a FlowDefinition (or syntax/structure problems).
@@ -98,6 +98,7 @@ export function yamlToDefinition(text: string): ParseResult {
 		description: asString(raw.description, ''),
 		inputs: asArray(raw.inputs),
 		variables: asArray(raw.variables),
+		env: asArray(raw.env).filter((v): v is string => typeof v === 'string'),
 		triggers: asArray(raw.triggers),
 		tasks: asArray(raw.tasks)
 	} as FlowDefinition;

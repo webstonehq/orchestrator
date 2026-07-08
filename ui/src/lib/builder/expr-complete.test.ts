@@ -10,6 +10,7 @@ const def: FlowDefinition = {
 	description: '',
 	inputs: [{ id: 'since', type: 'DATE' }],
 	variables: [{ id: 'server', value: 'https://x' }],
+	env: ['GITHUB_TOKEN'],
 	triggers: [],
 	tasks: [
 		{
@@ -55,6 +56,7 @@ describe('expressionGroups (global scope)', () => {
 		expect(values).toContain('outputs.fan.results');
 		expect(values).toContain('outputs.child.body'); // parallel child, not just upstream
 		expect(values).toContain('vars.server');
+		expect(values).toContain('env.GITHUB_TOKEN');
 		expect(values).toContain('secrets.API_TOKEN');
 		expect(values).toContain('now()');
 	});

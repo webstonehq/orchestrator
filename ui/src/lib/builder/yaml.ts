@@ -52,6 +52,9 @@ function orderedDefinition(def: FlowDefinition): Record<string, YamlValue> {
 			...(inp.default !== undefined && inp.default !== null ? { default: inp.default } : {})
 		})),
 		variables: def.variables.map((v) => ({ id: v.id, value: v.value })),
+		// Skipped on the wire when empty (serde `skip_serializing_if`), so emit
+		// it only when non-empty to keep exports byte-identical.
+		...(def.env && def.env.length > 0 ? { env: def.env } : {}),
 		triggers: def.triggers.map((t) => ({
 			id: t.id,
 			type: t.type,

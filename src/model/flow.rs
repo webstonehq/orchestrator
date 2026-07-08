@@ -41,6 +41,17 @@ pub struct FlowDefinition {
     /// Flow-scoped constants referenced as `{{ vars.<id> }}`.
     #[serde(default)]
     pub variables: Vec<VarDef>,
+    /// Environment variable names this flow reads, referenced as
+    /// `{{ env.<NAME> }}`. Declaring a name is the whole contract: it is the
+    /// only way a name reaches autocomplete AND the only name resolvable at
+    /// run time (an undeclared `{{ env.X }}` is a definition-time error).
+    /// Values are read from the worker's process environment at run start;
+    /// a declared name that is unset fails the run. Unlike `secrets`, env
+    /// values are treated as deployment config and are NOT redacted from logs
+    /// — put anything sensitive in the secret store instead. Omitted from
+    /// serialization when empty so existing flows round-trip byte-identically.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
     /// Schedule triggers.
     #[serde(default)]
     pub triggers: Vec<TriggerDef>,

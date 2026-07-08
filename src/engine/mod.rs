@@ -659,17 +659,17 @@ impl Engine {
     ) -> Result<Map<String, Value>, EngineError> {
         let mut errors = Vec::new();
         let mut out = Map::new();
-        // Context for rendering non-secret defaults; built at most once.
-        // Deliberately contains NO secrets: secret-referencing values are
-        // stored raw and late-bound at run start.
+        // Context for rendering create-time-resolvable defaults; built at most
+        // once. Deliberately contains NO secrets or env: those roots are
+        // late-bound (stored raw, rendered at run start) via references_deferred.
         let mut default_ctx: Option<Value> = None;
 
         for input in &def.inputs {
             if let Some(value) = provided.remove(&input.id) {
-                // Secret-referencing template: store the raw template string,
-                // skip the typed check (both happen at run start).
+                // Secret-/env-referencing template: store the raw template
+                // string, skip the typed check (both happen at run start).
                 if let Value::String(s) = &value
-                    && references_secrets(s)
+                    && references_deferred(s)
                 {
                     out.insert(input.id.clone(), value);
                     continue;
@@ -687,9 +687,9 @@ impl Engine {
                 continue;
             }
             if let Some(default) = &input.default {
-                // Secret-referencing default: store the raw template string;
-                // it is rendered with the full context at run start.
-                if references_secrets(default) {
+                // Secret-/env-referencing default: store the raw template
+                // string; it is rendered with the full context at run start.
+                if references_deferred(default) {
                     out.insert(input.id.clone(), Value::String(default.clone()));
                     continue;
                 }
@@ -737,8 +737,8 @@ impl Engine {
 }
 
 /// Context for rendering non-secret input defaults at create time: variables
-/// as literal strings (never template-rendered). Contains no secrets — any
-/// secret-referencing value is stored raw and rendered at run start instead.
+/// as literal strings (never template-rendered). Contains no secrets or env —
+/// any secret-/env-referencing value is stored raw and rendered at run start.
 fn create_time_render_ctx(def: &FlowDefinition) -> Value {
     let vars: Map<String, Value> = def
         .variables
@@ -748,14 +748,26 @@ fn create_time_render_ctx(def: &FlowDefinition) -> Value {
     json!({ "vars": vars })
 }
 
-/// Whether a string parses as a template with at least one reference rooted
-/// at `secrets`. Strings that fail to parse are not templates (`false`).
-pub(crate) fn references_secrets(template: &str) -> bool {
+/// Whether a template references a root that can only be resolved at run start,
+/// not at create time: `secrets` (values live in the store) or `env` (values
+/// live in the worker's process environment). Such input defaults/values are
+/// stored raw and rendered against the full context at run start. Strings that
+/// fail to parse are not templates (`false`).
+pub(crate) fn references_deferred(template: &str) -> bool {
     expr::referenced_paths(template).is_ok_and(|paths| {
-        paths
-            .iter()
-            .any(|p| p == "secrets" || p.starts_with("secrets.") || p.starts_with("secrets["))
+        paths.iter().any(|p| {
+            references_root(p, "secrets") || references_root(p, "env")
+        })
     })
+}
+
+/// True when a canonical reference path is rooted at `root` (exact, dotted, or
+/// indexed).
+fn references_root(path: &str, root: &str) -> bool {
+    path == root
+        || path.strip_prefix(root).is_some_and(|rest| {
+            rest.starts_with('.') || rest.starts_with('[')
+        })
 }
 
 /// Finalize a rendered input value (default or late-bound secret template):

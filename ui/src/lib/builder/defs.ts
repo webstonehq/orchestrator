@@ -49,6 +49,9 @@ export function initDefinition(def: FlowDefinition): FlowDefinition {
 			...(inp.default !== undefined && inp.default !== null ? { default: inp.default } : {})
 		})),
 		variables: (def.variables ?? []).map((v) => ({ id: v.id, value: v.value })),
+		// `env` is skip-when-empty on the wire: include it only when non-empty so
+		// a round-trip stays deep-equal (never invent `env: []`).
+		...(def.env && def.env.length > 0 ? { env: [...def.env] } : {}),
 		triggers: (def.triggers ?? []).map((t) => ({
 			id: t.id,
 			type: t.type,

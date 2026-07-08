@@ -2,7 +2,7 @@
  * Builds the grouped item list for the expression picker (ExprPicker).
  *
  * Group order: INPUTS, OUTPUTS · <task> (one per upstream task, in the order
- * given), VARIABLES, SECRETS, FUNCTIONS, then ITERATION and
+ * given), VARIABLES, ENV, SECRETS, FUNCTIONS, then ITERATION and
  * PRIOR STEPS · <id> when applicable. Empty groups are skipped.
  *
  * Scoping (which tasks count as "upstream", which siblings are "prior") is
@@ -24,6 +24,8 @@ export interface PickerGroup {
 export interface PickerOptions {
 	inputs: { id: string; type: string }[];
 	variables: { id: string }[];
+	/** Env var names declared in the flow's `env:` list (referenced as `env.<NAME>`). */
+	envNames: string[];
 	secretNames: string[];
 	/** Tasks earlier in the graph, already scoped by the caller. */
 	upstreamTasks: { id: string; outputs: { name: string; type: string }[] }[];
@@ -66,6 +68,17 @@ export function pickerGroups(opts: PickerOptions): PickerGroup[] {
 				label: `vars.${v.id}`,
 				type: 'STRING',
 				value: `vars.${v.id}`
+			}))
+		});
+	}
+
+	if (opts.envNames.length > 0) {
+		groups.push({
+			title: 'ENV',
+			items: opts.envNames.map((name) => ({
+				label: `env.${name}`,
+				type: 'STRING',
+				value: `env.${name}`
 			}))
 		});
 	}

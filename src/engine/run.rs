@@ -163,11 +163,20 @@ pub(crate) async fn execute_run(
         .map(|(name, value)| (name, Value::String(value)))
         .collect();
 
+    // Read the declared environment variables from the worker's process
+    // environment. A name declared in `env:` but not set fails the run before
+    // it starts (the declaration is a hard requirement). Env values are config,
+    // not secrets, so they are NOT added to `secret_values`/redaction.
+    let env_obj = match resolve_env(&def) {
+        Ok(obj) => obj,
+        Err(msg) => return fail_before_start(sink.as_ref(), run_id, &msg, &secret_values),
+    };
+
     // Finalize inputs with the full context: apply defaults that were not
     // resolvable at create time (e.g. scheduler-inserted `{}` inputs) and
-    // late-bind secret-referencing template values. Never written back to
+    // late-bind secret-/env-referencing template values. Never written back to
     // the run row.
-    let inputs = match finalize_inputs(&def, stored_inputs, &vars, &secrets_obj) {
+    let inputs = match finalize_inputs(&def, stored_inputs, &vars, &secrets_obj, &env_obj) {
         Ok(inputs) => inputs,
         Err(msg) => return fail_before_start(sink.as_ref(), run_id, &msg, &secret_values),
     };
@@ -177,6 +186,7 @@ pub(crate) async fn execute_run(
         "vars": vars,
         "outputs": {},
         "secrets": secrets_obj,
+        "env": env_obj,
     });
 
     let scope = RunScope {
@@ -382,12 +392,40 @@ pub(crate) async fn execute_run(
     }
 }
 
-/// Finalize the stored inputs at run start with the full `{vars, secrets}`
+/// Build the `env` context object from the flow's declared env var names,
+/// reading each from the worker's process environment. A declared name that is
+/// unset (or holds non-UTF-8) is a hard error that fails the run before it
+/// starts — declaring a name in `env:` states the flow requires it. Validation
+/// guarantees every `{{ env.<NAME> }}` reference names a declared var, so this
+/// map covers every env reference the run can make.
+fn resolve_env(def: &FlowDefinition) -> Result<Map<String, Value>, String> {
+    let mut out = Map::new();
+    for name in &def.env {
+        match std::env::var(name) {
+            Ok(value) => {
+                out.insert(name.clone(), Value::String(value));
+            }
+            Err(std::env::VarError::NotPresent) => {
+                return Err(format!(
+                    "environment variable `{name}` is declared in `env:` but not set"
+                ));
+            }
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(format!(
+                    "environment variable `{name}` is not valid UTF-8"
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Finalize the stored inputs at run start with the full `{vars, secrets, env}`
 /// context:
 /// - a declared input missing from the stored object gets its default
 ///   rendered/coerced/type-checked, or fails the run if it is required with
 ///   no default (scheduler-created runs insert `{}` and rely on this);
-/// - a stored string value that is a template referencing `secrets.*`
+/// - a stored string value that is a template referencing `secrets.*`/`env.*`
 ///   (late-bound at create time) is rendered/coerced/type-checked here.
 ///
 /// The finalized values are used for execution only — never written back to
@@ -397,12 +435,13 @@ fn finalize_inputs(
     stored: Value,
     vars: &Map<String, Value>,
     secrets_obj: &Map<String, Value>,
+    env_obj: &Map<String, Value>,
 ) -> Result<Map<String, Value>, String> {
     let mut inputs = match stored {
         Value::Object(map) => map,
         _ => Map::new(),
     };
-    let ctx = json!({ "vars": vars, "secrets": secrets_obj });
+    let ctx = json!({ "vars": vars, "secrets": secrets_obj, "env": env_obj });
     for input in &def.inputs {
         match inputs.get(&input.id).cloned() {
             None => {
@@ -420,7 +459,7 @@ fn finalize_inputs(
                     ));
                 }
             }
-            Some(Value::String(s)) if super::references_secrets(&s) => {
+            Some(Value::String(s)) if super::references_deferred(&s) => {
                 let rendered = expr::render(&s, &ctx)
                     .map_err(|e| format!("input \"{}\": template error: {e}", input.id))?;
                 let value = super::parse_default(input.input_type, rendered)

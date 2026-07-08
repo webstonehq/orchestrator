@@ -720,6 +720,10 @@ async fn flow_schema_endpoint_serves_a_json_schema_covering_plugins() {
     );
     // The top-level YAML `id` key is part of the schema.
     assert_eq!(schema["properties"]["id"]["type"], json!("string"));
+    // The declared `env` names list is in the schema so the raw-YAML editor
+    // knows the key and validates it as an array of strings.
+    assert_eq!(schema["properties"]["env"]["type"], json!("array"));
+    assert_eq!(schema["properties"]["env"]["items"]["type"], json!("string"));
 }
 
 #[tokio::test]

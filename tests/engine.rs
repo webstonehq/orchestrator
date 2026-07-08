@@ -747,6 +747,95 @@ async fn secrets_reach_the_wire_but_never_the_database() {
 }
 
 // ---------------------------------------------------------------------------
+// 10b. Env vars: resolve from the process environment; config, not secrets
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn env_values_resolve_and_are_not_redacted() {
+    // `env.*` is deployment config: it reaches the wire AND appears verbatim in
+    // logs — unlike `secrets.*`, which are masked. Unique var name so the
+    // shared, process-global environment can't collide with a parallel test.
+    let var = "ORCH_TEST_ENV_REGION_A1";
+    const VALUE: &str = "us-west-cfg-9271";
+    // SAFETY: unique name, set/removed within this test; no other test reads it.
+    unsafe { std::env::set_var(var, VALUE) };
+    let env = new_env();
+
+    let server = MockServer::start().await;
+    // Matches only if the REAL env value arrives on the wire.
+    Mock::given(method("GET"))
+        .and(path(format!("/region/{VALUE}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/region/{{{{ env.{var} }}}}", server.uri());
+    save_flow(
+        &env,
+        "envcfg",
+        json!({
+            "name": "envcfg",
+            "env": [var],
+            "tasks": [
+                {"id": "t1", "type": "http.request", "config": {"method": "GET", "url": url}}
+            ]
+        }),
+    );
+
+    let run_id = create_run(&env, "envcfg", json!({})).unwrap();
+    let run = start_and_wait(&env, run_id).await;
+    assert_eq!(run.status, "success", "run error: {:?}", run.error);
+
+    // NOT redacted: the request log carries the real value, never a mask.
+    let logs = env.db.list_logs(run_id, 0, 10_000).unwrap();
+    assert!(
+        logs.iter().any(|l| l.message.contains(VALUE)),
+        "expected the un-redacted env value in a log, got: {:?}",
+        logs.iter().map(|l| &l.message).collect::<Vec<_>>()
+    );
+    assert!(
+        !logs.iter().any(|l| l.message.contains("/region/***")),
+        "env value must not be masked like a secret"
+    );
+
+    // SAFETY: unique name owned by this test.
+    unsafe { std::env::remove_var(var) };
+}
+
+#[tokio::test]
+async fn declared_env_var_unset_fails_the_run_before_start() {
+    let var = "ORCH_TEST_ENV_UNSET_XYZZY";
+    // SAFETY: unique name; ensure it is absent regardless of ambient env.
+    unsafe { std::env::remove_var(var) };
+    let env = new_env();
+    save_flow(
+        &env,
+        "envmissing",
+        json!({
+            "name": "envmissing",
+            "env": [var],
+            // Would refuse to connect if ever reached — but it never is.
+            "tasks": [{"id": "t1", "type": "http.request", "config": {"url": "http://127.0.0.1:1/never"}}]
+        }),
+    );
+
+    let run_id = create_run(&env, "envmissing", json!({})).unwrap();
+    let run = start_and_wait(&env, run_id).await;
+    assert_eq!(run.status, "failed");
+    let err = run.error.unwrap_or_default();
+    assert!(
+        err.contains(var) && err.contains("not set"),
+        "expected a clear 'declared but not set' error, got: {err}"
+    );
+    // Failed before start: no task ever ran.
+    assert!(
+        env.db.list_task_runs(run_id).unwrap().is_empty(),
+        "no task should run when a declared env var is unset"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 11. Input resolution
 // ---------------------------------------------------------------------------
 

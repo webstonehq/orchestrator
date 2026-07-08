@@ -46,6 +46,7 @@ fn flow_with_tasks(tasks: Vec<TaskDef>) -> FlowDefinition {
         description: String::new(),
         inputs: vec![],
         variables: vec![],
+        env: vec![],
         triggers: vec![],
         tasks,
     }
@@ -77,6 +78,7 @@ fn example_flow() -> FlowDefinition {
             id: "server".to_string(),
             value: "https://api.example.com".to_string(),
         }],
+        env: vec![],
         triggers: vec![TriggerDef {
             id: "nightly".to_string(),
             trigger_type: "schedule".to_string(),
@@ -844,6 +846,77 @@ fn validate_checks_input_default_templates() {
         "inputs[0].default",
         "unknown variable `nope`",
     );
+}
+
+#[test]
+fn validate_accepts_declared_env_reference() {
+    let mut def = flow_with_tasks(vec![http_task(
+        "fetch",
+        json!({ "url": "https://{{ env.API_HOST }}/x" }),
+    )]);
+    def.env = vec!["API_HOST".to_string()];
+    let errs = validate(&def, &registry());
+    assert_eq!(errs, vec![], "declared env ref should validate, got: {errs:#?}");
+}
+
+#[test]
+fn validate_rejects_undeclared_env_reference() {
+    // Referenced but never declared in `env:` → the declaration is the contract.
+    let def = flow_with_tasks(vec![http_task(
+        "fetch",
+        json!({ "url": "https://{{ env.API_HOST }}/x" }),
+    )]);
+    assert_err(
+        &validate(&def, &registry()),
+        "tasks[0].config.url",
+        "undeclared env var `API_HOST`",
+    );
+}
+
+#[test]
+fn validate_rejects_incomplete_env_reference() {
+    let mut def = flow_with_tasks(vec![http_task(
+        "fetch",
+        json!({ "url": "{{ env }}" }),
+    )]);
+    def.env = vec!["API_HOST".to_string()];
+    assert_err(
+        &validate(&def, &registry()),
+        "tasks[0].config.url",
+        "expected `env.<NAME>`",
+    );
+}
+
+#[test]
+fn validate_rejects_bad_env_name_and_duplicates() {
+    let mut def = flow_with_tasks(vec![]);
+    def.env = vec![
+        "ok_NAME".to_string(),
+        "bad-name".to_string(),
+        "ok_NAME".to_string(),
+    ];
+    let errs = validate(&def, &registry());
+    assert_err(&errs, "env[1]", "invalid env var name `bad-name`");
+    assert_err(&errs, "env[2]", "duplicate env var `ok_NAME`");
+}
+
+#[test]
+fn env_omitted_from_serialization_when_empty() {
+    let def: FlowDefinition =
+        serde_json::from_value(json!({ "name": "f", "tasks": [] })).expect("deserialize");
+    assert!(def.env.is_empty());
+    let back = serde_json::to_value(&def).expect("serialize");
+    assert!(back.get("env").is_none(), "empty env should be omitted");
+}
+
+#[test]
+fn env_round_trips_when_present() {
+    let def: FlowDefinition =
+        serde_json::from_value(json!({ "name": "f", "env": ["API_HOST"], "tasks": [] }))
+            .expect("deserialize");
+    assert_eq!(def.env, vec!["API_HOST".to_string()]);
+    let back = serde_json::to_value(&def).expect("serialize");
+    assert_eq!(back["env"], json!(["API_HOST"]));
 }
 
 // ---------- TaskDef deserialize error branches ----------

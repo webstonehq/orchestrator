@@ -90,6 +90,26 @@ describe('flowToYaml', () => {
 		);
 	});
 
+	it('emits declared env names as a block sequence between variables and triggers, omitted when empty', () => {
+		const withEnv: FlowDefinition = {
+			name: 'x',
+			namespace: 'default',
+			description: '',
+			inputs: [],
+			variables: [],
+			env: ['GITHUB_TOKEN', 'REGION'],
+			triggers: [],
+			tasks: []
+		};
+		// Dashes sit at the key's own indent (serde_yaml block-sequence style),
+		// positioned right after `variables:` and before `triggers:`.
+		expect(flowToYaml('x', withEnv)).toContain(
+			'variables: []\nenv:\n- GITHUB_TOKEN\n- REGION\ntriggers: []'
+		);
+		// Empty/absent env produces no `env:` line at all.
+		expect(flowToYaml('x', { ...withEnv, env: [] })).not.toContain('env:');
+	});
+
 	it('emits multi-line strings as literal blocks', () => {
 		const def: FlowDefinition = {
 			name: 'x',

@@ -7,6 +7,7 @@ const base = {
 		{ id: 'count', type: 'INT' }
 	],
 	variables: [{ id: 'server' }],
+	envNames: [] as string[],
 	secretNames: ['API_TOKEN'],
 	upstreamTasks: [
 		{ id: 'discover', outputs: [{ name: 'ids', type: 'ARRAY' }] },
@@ -64,10 +65,28 @@ describe('pickerGroups', () => {
 		]);
 	});
 
+	it('formats env names as env.<NAME> STRING, placed between VARIABLES and SECRETS', () => {
+		const groups = pickerGroups({ ...base, envNames: ['GITHUB_TOKEN', 'REGION'] });
+		const envGroup = groups.find((g) => g.title === 'ENV');
+		expect(envGroup?.items).toEqual([
+			{ label: 'env.GITHUB_TOKEN', type: 'STRING', value: 'env.GITHUB_TOKEN' },
+			{ label: 'env.REGION', type: 'STRING', value: 'env.REGION' }
+		]);
+		const titles = groups.map((g) => g.title);
+		expect(titles.indexOf('ENV')).toBeGreaterThan(titles.indexOf('VARIABLES'));
+		expect(titles.indexOf('ENV')).toBeLessThan(titles.indexOf('SECRETS'));
+	});
+
+	it('skips the ENV group when no env names are declared', () => {
+		const groups = pickerGroups({ ...base, envNames: [] });
+		expect(groups.some((g) => g.title === 'ENV')).toBe(false);
+	});
+
 	it('always includes FUNCTIONS with now() DATE', () => {
 		const groups = pickerGroups({
 			inputs: [],
 			variables: [],
+			envNames: [],
 			secretNames: [],
 			upstreamTasks: []
 		});
@@ -80,6 +99,7 @@ describe('pickerGroups', () => {
 		const groups = pickerGroups({
 			inputs: [],
 			variables: [{ id: 'server' }],
+			envNames: [],
 			secretNames: [],
 			upstreamTasks: [{ id: 'noout', outputs: [] }]
 		});
@@ -134,6 +154,7 @@ describe('pickerGroups', () => {
 		const groups = pickerGroups({
 			inputs: [],
 			variables: [],
+			envNames: [],
 			secretNames: [],
 			upstreamTasks: [
 				{ id: 'b', outputs: [{ name: 'x', type: 'STRING' }] },

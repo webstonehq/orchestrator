@@ -44,6 +44,9 @@ pub fn cron_parser() -> croner::parser::CronParser {
 struct Ctx<'a> {
     inputs: HashSet<&'a str>,
     vars: HashSet<&'a str>,
+    /// Env var names declared in the flow's `env:` list — the only names a
+    /// `{{ env.<NAME> }}` reference may resolve.
+    env: HashSet<&'a str>,
     registry: &'a PluginRegistry,
 }
 
@@ -79,12 +82,14 @@ pub fn validate(def: &FlowDefinition, registry: &PluginRegistry) -> Vec<Validati
 
     let input_ids = validate_inputs(def, &mut errs);
     let var_ids = validate_variables(def, &mut errs);
+    let env_names = validate_env(def, &mut errs);
     validate_triggers(def, &mut errs);
     validate_schedule_input_defaults(def, &mut errs);
 
     let ctx = Ctx {
         inputs: input_ids,
         vars: var_ids,
+        env: env_names,
         registry,
     };
     validate_input_defaults(def, &ctx, &mut errs);
@@ -227,6 +232,43 @@ fn validate_variables<'a>(
         }
     }
     var_ids
+}
+
+/// Check declared env var names (shape + uniqueness) and return the declared
+/// set. Names follow the environment-variable grammar `[A-Za-z_][A-Za-z0-9_]*`
+/// (uppercase allowed), matching the secret-store name rule.
+fn validate_env<'a>(def: &'a FlowDefinition, errs: &mut Vec<ValidationErr>) -> HashSet<&'a str> {
+    let mut names: HashSet<&str> = HashSet::new();
+    for (i, name) in def.env.iter().enumerate() {
+        if !is_valid_env_name(name) {
+            push(
+                errs,
+                format!("env[{i}]"),
+                format!("invalid env var name `{name}`: must match [A-Za-z_][A-Za-z0-9_]*"),
+            );
+        }
+        if !names.insert(name) {
+            push(
+                errs,
+                format!("env[{i}]"),
+                format!("duplicate env var `{name}`"),
+            );
+        }
+    }
+    names
+}
+
+/// The environment-variable name grammar: `[A-Za-z_][A-Za-z0-9_]*`. Kept in
+/// step with the secret store's `validate_name` (see `crate::secrets`).
+fn is_valid_env_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    match bytes.next() {
+        Some(first) => {
+            (first.is_ascii_alphabetic() || first == b'_')
+                && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        }
+        None => false,
+    }
 }
 
 /// Check trigger ids, kind, cron syntax (strict 5-field), and timezone.
@@ -553,6 +595,21 @@ fn check_ref(ref_path: &str, err_path: &str, scope: &Scope<'_>, errs: &mut Vec<V
                 );
             }
         }
+        // Env names must be declared in the flow's `env:` list (the declaration
+        // is the contract — see `FlowDefinition::env`).
+        "env" => match segs.get(1) {
+            None => push(
+                errs,
+                err_path,
+                format!("incomplete reference `{ref_path}`: expected `env.<NAME>`"),
+            ),
+            Some(name) if !scope.ctx.env.contains(name.as_str()) => push(
+                errs,
+                err_path,
+                format!("undeclared env var `{name}` in `{ref_path}`: add it to the flow's `env:` list"),
+            ),
+            Some(_) => {}
+        },
         "outputs" => {
             if segs.len() < 3 {
                 push(
