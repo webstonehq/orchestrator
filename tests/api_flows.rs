@@ -38,6 +38,7 @@ struct Env {
     _dir: TempDir,
     db: Db,
     app: Router,
+    engine: Arc<Engine>,
 }
 
 fn new_env() -> Env {
@@ -63,7 +64,7 @@ fn new_env() -> Env {
     let scheduler = Scheduler::new(db.clone(), Arc::new(NoopLauncher), Arc::new(SystemClock));
     let state = AppState {
         db: db.clone(),
-        engine,
+        engine: Arc::clone(&engine),
         registry,
         secrets,
         scheduler,
@@ -72,7 +73,12 @@ fn new_env() -> Env {
     // Merge the UI router like `main` does: it owns the JSON 404 fallback
     // for unknown /api paths.
     let app = api::router(state).merge(orchestrator::ui::router());
-    Env { _dir: dir, db, app }
+    Env {
+        _dir: dir,
+        db,
+        app,
+        engine,
+    }
 }
 
 /// Send a request with an optional raw body; returns status, headers, text.
@@ -150,8 +156,14 @@ async fn create_flow(env: &Env, id: &str, definition: Value) {
 async fn wait_for_finish(env: &Env, run_id: i64) -> orchestrator::db::RunRow {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
+        // Drive the in-process worker: the API only enqueues runs, so pump a
+        // claim each poll (as the server's local-worker loop does in prod).
+        env.engine.claim_local(64).expect("claim local");
         let run = env.db.get_run(run_id).expect("get run").expect("run row");
-        if matches!(run.status.as_str(), "success" | "failed" | "canceled") {
+        if matches!(
+            run.status.as_str(),
+            "success" | "degraded" | "failed" | "canceled"
+        ) {
             return run;
         }
         assert!(

@@ -160,6 +160,17 @@ impl Drop for ActiveGuard {
     }
 }
 
+/// Worker lease length (seconds). A claimed run is `leased`/`running` with a
+/// `lease_expires_at` this far ahead, renewed by heartbeats; a lapsed lease is
+/// reaped. Shared by remote workers (via the worker API) and the server's
+/// in-process worker.
+pub const LEASE_SECS: i64 = 30;
+
+/// Stable `worker_id` for the server's in-process worker — the local peer that
+/// claims the `local` queue. Claims, leases and the reaper treat it exactly
+/// like any remote worker id.
+pub const LOCAL_WORKER_ID: &str = "local";
+
 /// How recently (seconds) a worker must have been seen to count as `online`
 /// — a few of the worker's ~3s poll cycles.
 const WORKER_ONLINE_WITHIN_SECS: i64 = 15;
@@ -295,16 +306,57 @@ impl Engine {
         )?)
     }
 
-    /// Spawn the execution task for a `queued` run; returns immediately.
+    /// Claim queued runs off the `local` queue for the in-process worker and
+    /// spawn each. This is the local peer of [`Engine::claim_remote`]: same
+    /// atomic lease protocol (`worker_id = "local"`), but the runs execute
+    /// here through a [`LocalSink`](sink::LocalSink) writing straight to the
+    /// authoritative database rather than being shipped to a remote worker.
     ///
-    /// Starting a run that is not queued (already started, finished, or
-    /// currently active) fails with [`EngineError::NotQueued`], so calls are
-    /// idempotent-safe: at most one execution per run ever starts.
-    pub fn start(self: &Arc<Self>, run_id: i64) -> Result<(), EngineError> {
-        let mut active = self.active.lock().expect("engine.active poisoned");
-        if active.contains_key(&run_id) {
-            return Err(EngineError::NotQueued(run_id));
+    /// `capacity` is the in-process worker's total configured concurrency;
+    /// free slots are `capacity` minus the runs it already holds, so bursts
+    /// beyond capacity wait in `queued`. Returns the number of runs claimed.
+    pub fn claim_local(self: &Arc<Self>, capacity: u32) -> Result<usize, EngineError> {
+        let held = self
+            .db
+            .in_flight_run_ids(LOCAL_WORKER_ID)?
+            .len()
+            .try_into()
+            .unwrap_or(u32::MAX);
+        let free = capacity.saturating_sub(held);
+        if free == 0 {
+            return Ok(0);
         }
+        let rows = self.db.claim_runs(
+            LOCAL_WORKER_ID,
+            &[crate::model::LOCAL_QUEUE],
+            free,
+            LEASE_SECS,
+        )?;
+        let claimed = rows.len();
+        for run in rows {
+            self.start_claimed(run);
+        }
+        Ok(claimed)
+    }
+
+    /// Renew the in-process worker's leases on every run it currently holds —
+    /// the heartbeat that keeps a live local run from being reaped. A run that
+    /// has finished (terminal status) is no longer renewed and drops out.
+    pub fn heartbeat_local(&self) -> Result<(), EngineError> {
+        let ids = self.db.in_flight_run_ids(LOCAL_WORKER_ID)?;
+        self.db.renew_leases(LOCAL_WORKER_ID, &ids, LEASE_SECS)?;
+        Ok(())
+    }
+
+    /// Claim and execute one specific `queued` run in-process, through the
+    /// same lease path the in-process worker's poll loop uses (a targeted
+    /// claim to `"local"` + a [`LocalSink`](sink::LocalSink)). A run on a
+    /// non-`local` queue is left queued for a worker on that queue (`Ok`, a
+    /// no-op). A run that is not `queued` (already started, finished, or
+    /// active) fails with [`EngineError::NotQueued`]. Normal dispatch is the
+    /// poll loop ([`Engine::claim_local`]); this is a targeted entry point for
+    /// "run this run now" and for tests.
+    pub fn start(self: &Arc<Self>, run_id: i64) -> Result<(), EngineError> {
         let run = self
             .db
             .get_run(run_id)?
@@ -312,29 +364,58 @@ impl Engine {
         if run.status != "queued" {
             return Err(EngineError::NotQueued(run_id));
         }
-        // Routing: the in-process executor only serves the `local` queue. A
-        // run targeting another queue is left `queued` for a worker
-        // subscribed to that queue to claim; starting it here is a no-op.
+        // Runs on another queue wait for a worker subscribed to it.
         if run.queue != crate::model::LOCAL_QUEUE {
-            drop(active);
-            tracing::info!(
-                run_id,
-                queue = %run.queue,
-                "run left queued for a `{}` worker",
-                run.queue
-            );
+            tracing::info!(run_id, queue = %run.queue, "run left queued for a `{}` worker", run.queue);
             return Ok(());
         }
+        match self.db.claim_run(run_id, LOCAL_WORKER_ID, LEASE_SECS)? {
+            Some(row) => {
+                self.start_claimed(row);
+                Ok(())
+            }
+            // Lost the race — a poll-loop claim or another caller took it.
+            None => Err(EngineError::NotQueued(run_id)),
+        }
+    }
+
+    /// [`Engine::create_run`] then [`Engine::start`]: enqueue a run and run it
+    /// immediately in-process. A convenience for "run now"; the scheduler and
+    /// API instead enqueue via `create_run` and let a worker claim.
+    pub fn create_and_start(
+        self: &Arc<Self>,
+        flow_id: &str,
+        inputs: Map<String, Value>,
+        trigger: &str,
+        scheduled_for: Option<&str>,
+    ) -> Result<i64, EngineError> {
+        let run_id = self.create_run(flow_id, inputs, trigger, scheduled_for)?;
+        self.start(run_id)?;
+        Ok(run_id)
+    }
+
+    /// Register an already-claimed run as active and spawn its execution task
+    /// with a [`LocalSink`](sink::LocalSink). Shared by [`Engine::claim_local`]
+    /// (the in-process worker); the run is already `leased` in the database.
+    fn start_claimed(self: &Arc<Self>, run: crate::db::RunRow) {
+        let run_id = run.id;
         let cancel = CancellationToken::new();
         let (tx, _) = broadcast::channel(1024);
-        active.insert(
-            run_id,
-            RunHandle {
-                cancel: cancel.clone(),
-                events: tx.clone(),
-            },
-        );
-        drop(active);
+        {
+            let mut active = self.active.lock().expect("engine.active poisoned");
+            // A freshly-claimed run can't already be active, but guard anyway:
+            // never spawn a second execution for the same run.
+            if active.contains_key(&run_id) {
+                return;
+            }
+            active.insert(
+                run_id,
+                RunHandle {
+                    cancel: cancel.clone(),
+                    events: tx.clone(),
+                },
+            );
+        }
 
         // The in-process sink persists to SQLite and broadcasts on the run's
         // live channel — the same channel `subscribe` hands to SSE clients.
@@ -349,21 +430,6 @@ impl Engine {
             let guard = ActiveGuard { engine, run_id };
             run::execute_run(&guard.engine, run, cancel, sink).await;
         });
-        Ok(())
-    }
-
-    /// Queued-run convenience for the scheduler/API:
-    /// [`Engine::create_run`] followed by [`Engine::start`].
-    pub fn create_and_start(
-        self: &Arc<Self>,
-        flow_id: &str,
-        inputs: Map<String, Value>,
-        trigger: &str,
-        scheduled_for: Option<&str>,
-    ) -> Result<i64, EngineError> {
-        let run_id = self.create_run(flow_id, inputs, trigger, scheduled_for)?;
-        self.start(run_id)?;
-        Ok(run_id)
     }
 
     /// Execute an already-loaded run to completion, reporting through `sink`.
@@ -448,15 +514,55 @@ impl Engine {
         Ok(assignments)
     }
 
+    /// Apply a batch of updates a worker reported for one run, after verifying
+    /// the worker still **owns** the run. Ownership is the second fence (with
+    /// the per-update terminal fence): a run that was reaped and requeued gets
+    /// re-claimed by another worker and its `last_seq` reset to 0, so the old
+    /// worker's buffered updates would otherwise pass the seq check and corrupt
+    /// the new attempt. If the reporting `worker_id` is no longer the lease
+    /// owner, the whole batch is dropped and `Ok(false)` is returned so the
+    /// caller can tell the stale worker to stop. Otherwise each update is
+    /// applied (still individually deduped and terminal-fenced) and `Ok(true)`
+    /// returned.
+    pub fn apply_remote_batch(
+        self: &Arc<Self>,
+        worker_id: &str,
+        run_id: i64,
+        updates: Vec<wire::SeqUpdate>,
+    ) -> Result<bool, EngineError> {
+        if !self.db.worker_owns_run(worker_id, run_id)? {
+            return Ok(false);
+        }
+        for wire::SeqUpdate { seq, update } in updates {
+            self.apply_remote_update(run_id, seq, update)?;
+        }
+        Ok(true)
+    }
+
     /// Apply one worker-reported update to run `run_id`, deduplicating by
-    /// `seq`. Returns `true` if applied, `false` if it was a stale/duplicate
-    /// replay. A terminal run-status update ends the run's live channel.
+    /// `seq`. Returns `true` if applied, `false` if it was ignored (a
+    /// stale/duplicate replay, or an update to an already-terminal run). A
+    /// terminal run-status update ends the run's live channel.
     pub fn apply_remote_update(
         self: &Arc<Self>,
         run_id: i64,
         seq: i64,
         update: wire::RunUpdate,
     ) -> Result<bool, EngineError> {
+        // A terminal run is frozen: once it has settled server-side — most
+        // importantly when the reaper fails it after its lease lapses — ignore
+        // any further worker updates. Otherwise a worker that kept executing
+        // through a network gap and reconnects after being reaped would flush
+        // its buffered updates and resurrect the run: flip the status back to
+        // running/success and un-cancel its task rows. Drop them, and make
+        // sure the reaped run isn't lingering in the live-channel map.
+        if self.db.run_is_terminal(run_id)? {
+            self.active
+                .lock()
+                .expect("engine.active poisoned")
+                .remove(&run_id);
+            return Ok(false);
+        }
         if !self.db.bump_seq(run_id, seq)? {
             return Ok(false);
         }
@@ -571,21 +677,107 @@ impl Engine {
             .collect()
     }
 
-    /// Reap runs whose worker lease lapsed: fail them in the database and end
-    /// their live channels. Returns the reaped run ids.
+    /// Reap runs whose worker lease lapsed. Each is resolved uniformly for
+    /// local and remote: if the flow opts into retry via `on_worker_loss` and
+    /// attempts remain, the run is **requeued** for a fresh attempt (a waiting
+    /// worker re-claims it); otherwise it is **failed**. Live channels are
+    /// ended in both cases (a requeued run gets a fresh channel on re-claim).
+    /// Returns the ids of the runs that terminally failed.
     pub fn reap_lost_runs(&self) -> Result<Vec<i64>, EngineError> {
-        let ids = self.db.reap_expired_leases(&crate::db::now_rfc3339())?;
-        let mut active = self.active.lock().expect("engine.active poisoned");
-        for id in &ids {
-            if let Some(handle) = active.remove(id) {
-                let _ = handle.events.send(RunEvent::Run {
-                    status: "failed".to_string(),
-                    finished_at: Some(crate::db::now_rfc3339()),
-                    error: Some("worker lost (lease expired)".to_string()),
-                });
+        let now = crate::db::now_rfc3339();
+        let expired = self.db.expired_lease_runs(&now)?;
+        self.resolve_lost_runs(expired, &now)
+    }
+
+    /// Startup recovery, replacing the old `recover_interrupted`. After an
+    /// unclean shutdown no worker (in-process or remote) has re-established
+    /// anything yet, so **every** `leased`/`running` run is lost — resolve
+    /// them all (requeue if the flow opts into retry, else fail). Must run
+    /// before the in-process worker's first claim, so a crashed run is
+    /// requeued (fresh attempt, cleared lease) before it can be re-claimed.
+    /// Returns the ids of the runs that terminally failed.
+    pub fn recover_on_startup(&self) -> Result<Vec<i64>, EngineError> {
+        let now = crate::db::now_rfc3339();
+        let inflight = self.db.all_in_flight_runs()?;
+        self.resolve_lost_runs(inflight, &now)
+    }
+
+    /// Resolve runs whose worker was lost: each is **requeued** for a fresh
+    /// attempt if the flow's `on_worker_loss` allows one, otherwise **failed**.
+    /// Live channels are ended in both cases (a requeued run gets a fresh
+    /// channel on re-claim). Returns the ids of the runs that terminally
+    /// failed.
+    fn resolve_lost_runs(
+        &self,
+        runs: Vec<crate::db::RunRow>,
+        now: &str,
+    ) -> Result<Vec<i64>, EngineError> {
+        let mut failed = Vec::new();
+        for run in runs {
+            let max_attempts = self.flow_max_attempts(&run);
+            let attempts_used = (run.attempt + 1) as u32;
+            if attempts_used < max_attempts {
+                // Retry: requeue for a fresh attempt from the top.
+                if self.db.requeue_lost_run(run.id, run.attempt + 1)? {
+                    self.end_channel(
+                        run.id,
+                        RunEvent::Run {
+                            status: "queued".to_string(),
+                            finished_at: None,
+                            error: None,
+                        },
+                    );
+                    tracing::info!(
+                        run_id = run.id,
+                        attempt = run.attempt + 1,
+                        max_attempts,
+                        "run requeued after worker loss"
+                    );
+                }
+            } else if self.db.fail_lost_run(run.id, now)? {
+                failed.push(run.id);
+                self.end_channel(
+                    run.id,
+                    RunEvent::Run {
+                        status: "failed".to_string(),
+                        finished_at: Some(now.to_string()),
+                        error: Some("worker lost (lease expired)".to_string()),
+                    },
+                );
             }
         }
-        Ok(ids)
+        Ok(failed)
+    }
+
+    /// Broadcast a final event on a run's live channel (if any) and drop it
+    /// from the active map, closing the channel and ending SSE streams.
+    fn end_channel(&self, run_id: i64, event: RunEvent) {
+        if let Some(handle) = self
+            .active
+            .lock()
+            .expect("engine.active poisoned")
+            .remove(&run_id)
+        {
+            let _ = handle.events.send(event);
+        }
+    }
+
+    /// The flow's `on_worker_loss.max_attempts` for this run, using the run's
+    /// pinned revision (falling back to the flow's current definition, then to
+    /// `1` = no retry on any lookup/parse failure). Pinning `flow_rev` means a
+    /// retry re-runs the same code the run was created against.
+    fn flow_max_attempts(&self, run: &crate::db::RunRow) -> u32 {
+        let def_json = match self.db.get_revision(&run.flow_id, run.flow_rev) {
+            Ok(Some(rev)) => rev.definition,
+            _ => match self.db.get_flow(&run.flow_id) {
+                Ok(Some(flow)) => flow.definition,
+                _ => return 1,
+            },
+        };
+        serde_json::from_str::<FlowDefinition>(&def_json)
+            .ok()
+            .and_then(|def| def.on_worker_loss.map(|o| o.max_attempts))
+            .unwrap_or(1)
     }
 
     /// Get (creating if absent) the live broadcast channel for a remote run,
@@ -637,13 +829,6 @@ impl Engine {
             .expect("engine.active poisoned")
             .get(&run_id)
             .map(|handle| handle.events.subscribe())
-    }
-
-    /// Startup recovery after an unclean shutdown: marks runs/tasks that were
-    /// still `queued`/`running` as failed ("interrupted by shutdown") and
-    /// their items `canceled`. Returns the number of rows changed.
-    pub fn recover_interrupted(&self) -> Result<u64, EngineError> {
-        Ok(self.db.mark_interrupted()?)
     }
 
     /// Number of currently executing runs (for the UI's engine widget).
@@ -823,5 +1008,248 @@ pub(crate) fn json_type_name(value: &Value) -> &'static str {
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use r2d2_sqlite::SqliteConnectionManager;
+
+    /// Build an engine plus a second `Db` handle on the same file for
+    /// read-back assertions (the engine takes ownership of its `Db`). The
+    /// secret store sits on its own throwaway pool — the reap/apply paths
+    /// under test never touch it.
+    fn engine_with_reader(dir: &std::path::Path) -> (Arc<Engine>, Db) {
+        let db = Db::open(dir.join("app.db")).unwrap();
+        let reader = Db::open(dir.join("app.db")).unwrap();
+        let mgr = SqliteConnectionManager::file(dir.join("secrets.db"));
+        let pool = r2d2::Pool::builder().build(mgr).unwrap();
+        let secrets = Arc::new(SecretStore::open(&dir.join("secret.key"), pool).unwrap());
+        let engine = Engine::new(db, Arc::new(PluginRegistry::new()), secrets);
+        (engine, reader)
+    }
+
+    fn run_status(status: &str) -> RunUpdate {
+        RunUpdate::RunStatus {
+            status: status.to_string(),
+            error: None,
+            started_at: None,
+            finished_at: None,
+        }
+    }
+
+    // Regression: a worker that keeps executing through a network gap and
+    // reconnects after the reaper has failed its run must not be able to flush
+    // its buffered updates and resurrect that run.
+    #[test]
+    fn reaped_run_is_not_resurrected_by_late_worker_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, reader) = engine_with_reader(dir.path());
+
+        // A run leased to a worker with an already-expired lease (negative
+        // secs), then reaped. No flow row exists, so max_attempts defaults to
+        // 1 (no retry) and the reaper fails it.
+        let run_id = reader
+            .insert_run("flow", 1, "manual", "{}", "default", None)
+            .unwrap();
+        reader.claim_runs("worker-1", &["default"], 1, -100).unwrap();
+        let reaped = engine.reap_lost_runs().unwrap();
+        assert_eq!(reaped, vec![run_id]);
+        assert!(reader.run_is_terminal(run_id).unwrap());
+
+        // The still-alive worker flushes buffered updates with fresh, higher
+        // seqs: a `running` status, then `success`, then a task upsert.
+        assert!(
+            !engine
+                .apply_remote_update(run_id, 10, run_status("running"))
+                .unwrap(),
+            "an update to an already-terminal run must be ignored",
+        );
+        engine
+            .apply_remote_update(run_id, 11, run_status("success"))
+            .unwrap();
+        engine
+            .apply_remote_update(
+                run_id,
+                12,
+                RunUpdate::TaskUpsert {
+                    task_id: "t1".to_string(),
+                    status: "running".to_string(),
+                    attempt: 0,
+                },
+            )
+            .unwrap();
+
+        // The run stays failed, and no task rows leaked in.
+        let run = reader.get_run(run_id).unwrap().unwrap();
+        assert_eq!(run.status, "failed");
+        assert_eq!(run.error.as_deref(), Some("worker lost (lease expired)"));
+        let task_rows: i64 = reader
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM task_runs WHERE run_id = ?1",
+                [run_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(task_rows, 0);
+    }
+
+    // A live (non-terminal) run must still accept worker updates, including the
+    // legitimate terminal `success` that settles it.
+    #[test]
+    fn live_run_still_accepts_updates_through_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, reader) = engine_with_reader(dir.path());
+
+        let run_id = reader
+            .insert_run("flow", 1, "manual", "{}", "default", None)
+            .unwrap();
+        reader.claim_runs("worker-1", &["default"], 1, 30).unwrap();
+
+        assert!(
+            engine
+                .apply_remote_update(run_id, 1, run_status("running"))
+                .unwrap(),
+            "a live run must accept updates",
+        );
+        assert_eq!(reader.get_run(run_id).unwrap().unwrap().status, "running");
+
+        engine
+            .apply_remote_update(run_id, 2, run_status("success"))
+            .unwrap();
+        assert_eq!(reader.get_run(run_id).unwrap().unwrap().status, "success");
+    }
+
+    // A flow that opts into retry is requeued for a fresh attempt each time its
+    // worker is lost, until attempts are exhausted, then fails.
+    #[test]
+    fn reaper_requeues_until_attempts_exhausted_then_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, reader) = engine_with_reader(dir.path());
+
+        // Flow opts into retry: 2 total attempts.
+        let def = r#"{"name":"f","on_worker_loss":{"max_attempts":2},"tasks":[]}"#;
+        reader
+            .upsert_flow_with_revision("f", "f", "default", "", def, "init")
+            .unwrap();
+        let run_id = reader
+            .insert_run("f", 1, "manual", "{}", "default", None)
+            .unwrap();
+
+        // Attempt 1 lost → requeued (attempt→1, back to queued, lease cleared).
+        reader.claim_runs("w1", &["default"], 1, -100).unwrap();
+        assert!(
+            engine.reap_lost_runs().unwrap().is_empty(),
+            "first loss should requeue, not fail",
+        );
+        let run = reader.get_run(run_id).unwrap().unwrap();
+        assert_eq!(run.status, "queued");
+        assert_eq!(run.attempt, 1);
+        assert!(run.worker_id.is_none());
+        assert_eq!(run.last_seq, 0);
+
+        // Attempt 2 lost → attempts exhausted → failed.
+        reader.claim_runs("w2", &["default"], 1, -100).unwrap();
+        assert_eq!(engine.reap_lost_runs().unwrap(), vec![run_id]);
+        let run = reader.get_run(run_id).unwrap().unwrap();
+        assert_eq!(run.status, "failed");
+        assert_eq!(run.attempt, 1);
+        assert_eq!(run.error.as_deref(), Some("worker lost (lease expired)"));
+    }
+
+    // Ownership fence: after a run is requeued and re-claimed by a new worker,
+    // the old (reaped) worker's buffered updates are rejected wholesale so they
+    // can't corrupt the new attempt — even though last_seq was reset to 0.
+    #[test]
+    fn stale_worker_updates_rejected_after_requeue_and_reclaim() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, reader) = engine_with_reader(dir.path());
+
+        let def = r#"{"name":"f","on_worker_loss":{"max_attempts":2},"tasks":[]}"#;
+        reader
+            .upsert_flow_with_revision("f", "f", "default", "", def, "init")
+            .unwrap();
+        let run_id = reader
+            .insert_run("f", 1, "manual", "{}", "default", None)
+            .unwrap();
+
+        // w1 claims (expired) → reaper requeues → w2 claims the fresh attempt.
+        reader.claim_runs("w1", &["default"], 1, -100).unwrap();
+        assert!(engine.reap_lost_runs().unwrap().is_empty());
+        reader.claim_runs("w2", &["default"], 1, 30).unwrap();
+        assert_eq!(
+            reader.get_run(run_id).unwrap().unwrap().worker_id.as_deref(),
+            Some("w2")
+        );
+
+        // The old worker w1 flushes buffered updates (fresh seqs > reset 0) →
+        // rejected wholesale because it no longer owns the run.
+        let owned = engine
+            .apply_remote_batch(
+                "w1",
+                run_id,
+                vec![SeqUpdate {
+                    seq: 10,
+                    update: run_status("success"),
+                }],
+            )
+            .unwrap();
+        assert!(!owned, "stale worker's batch must be rejected");
+        let run = reader.get_run(run_id).unwrap().unwrap();
+        assert_eq!(run.worker_id.as_deref(), Some("w2"));
+        assert_ne!(run.status, "success");
+
+        // The current owner w2 is accepted.
+        let owned = engine
+            .apply_remote_batch(
+                "w2",
+                run_id,
+                vec![SeqUpdate {
+                    seq: 1,
+                    update: run_status("running"),
+                }],
+            )
+            .unwrap();
+        assert!(owned);
+        assert_eq!(reader.get_run(run_id).unwrap().unwrap().status, "running");
+    }
+
+    // The in-process worker claims a queued `local` run (leasing it to
+    // "local") and executes it to completion through the same path a remote
+    // worker uses — a task-less flow trivially succeeds.
+    #[tokio::test]
+    async fn in_process_worker_claims_and_runs_a_local_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, reader) = engine_with_reader(dir.path());
+
+        let def = r#"{"name":"f","tasks":[]}"#;
+        reader
+            .upsert_flow_with_revision("f", "f", "default", "", def, "init")
+            .unwrap();
+        let run_id = engine.create_run("f", Map::new(), "manual", None).unwrap();
+        assert_eq!(reader.get_run(run_id).unwrap().unwrap().status, "queued");
+
+        // Claimed (1 run) and leased to the in-process worker.
+        assert_eq!(engine.claim_local(4).unwrap(), 1);
+        assert_eq!(
+            reader.get_run(run_id).unwrap().unwrap().worker_id.as_deref(),
+            Some(LOCAL_WORKER_ID)
+        );
+
+        // The spawned execution drives it to a terminal status.
+        let mut status = String::new();
+        for _ in 0..300 {
+            status = reader.get_run(run_id).unwrap().unwrap().status;
+            if matches!(status.as_str(), "success" | "failed" | "degraded") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(status, "success");
+        // Nothing left to claim.
+        assert_eq!(engine.claim_local(4).unwrap(), 0);
     }
 }

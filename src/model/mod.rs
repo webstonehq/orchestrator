@@ -14,8 +14,8 @@ mod yaml;
 use std::fmt;
 
 pub use flow::{
-    Catchup, FlowDefinition, InputDef, InputType, LOCAL_QUEUE, OnError, OutputDef, ParallelTask,
-    PluginTask, RetryPolicy, TaskDef, TaskKind, TriggerDef, VarDef,
+    Catchup, FlowDefinition, InputDef, InputType, LOCAL_QUEUE, OnError, OnWorkerLoss, OutputDef,
+    ParallelTask, PluginTask, RetryPolicy, TaskDef, TaskKind, TriggerDef, VarDef,
 };
 pub use schema::flow_json_schema;
 pub use validate::{

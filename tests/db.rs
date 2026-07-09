@@ -566,7 +566,7 @@ fn reconcile_schedules_preserves_state_and_removes_stale() {
 }
 
 #[test]
-fn mark_interrupted_fails_active_work() {
+fn fail_lost_run_fails_active_work_but_not_queued() {
     let (_dir, db) = open_temp();
     seed_flow(&db, "f1");
 
@@ -619,24 +619,37 @@ fn mark_interrupted_fails_active_work() {
     )
     .unwrap();
 
-    let changed = db.mark_interrupted().unwrap();
-    // 2 runs + 3 task_runs (running t1, pending t2, running fan) + 2 items
-    // (running idx0, queued idx2).
-    assert_eq!(changed, 7);
+    // Only the in-flight (running) run is "lost" — a queued run is not, since
+    // under the unified model it simply waits to be claimed.
+    let inflight: Vec<i64> = db
+        .all_in_flight_runs()
+        .unwrap()
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(inflight, vec![r_running]);
 
-    assert_eq!(db.get_run(r_queued).unwrap().unwrap().status, "failed");
+    assert!(db.fail_lost_run(r_running, &now).unwrap());
+
+    // Queued and finished runs are untouched.
+    assert_eq!(db.get_run(r_queued).unwrap().unwrap().status, "queued");
+    assert_eq!(db.get_run(r_done).unwrap().unwrap().status, "success");
+
     let r = db.get_run(r_running).unwrap().unwrap();
     assert_eq!(r.status, "failed");
-    assert_eq!(r.error.as_deref(), Some("interrupted by shutdown"));
+    assert_eq!(r.error.as_deref(), Some("worker lost (lease expired)"));
     assert!(r.finished_at.is_some());
-    assert_eq!(db.get_run(r_done).unwrap().unwrap().status, "success");
 
     let trs = db.list_task_runs(r_running).unwrap();
     assert!(trs.iter().all(|t| t.status == "failed"));
     assert_eq!(db.list_task_runs(r_done).unwrap()[0].status, "success");
 
+    // items: idx0 running→canceled, idx1 success stays, idx2 queued→canceled.
     assert_eq!(db.item_statuses_compact(tr).unwrap(), "csc");
-    assert_eq!(db.mark_interrupted().unwrap(), 0, "idempotent");
+
+    // Guarded: a run that is already terminal is not re-failed.
+    assert!(!db.fail_lost_run(r_running, &now).unwrap());
+    assert!(!db.fail_lost_run(r_done, &now).unwrap());
 }
 
 #[test]
@@ -848,8 +861,15 @@ fn reap_fails_expired_lease_and_spares_fresh_one() {
         .unwrap();
     }
 
-    let reaped = db.reap_expired_leases(&in_secs(0)).unwrap();
-    assert_eq!(reaped, vec![stale]);
+    // The reaper's two DB primitives: select expired leases, then fail one.
+    let expired: Vec<i64> = db
+        .expired_lease_runs(&in_secs(0))
+        .unwrap()
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(expired, vec![stale]);
+    assert!(db.fail_lost_run(stale, &in_secs(0)).unwrap());
 
     let stale_run = db.get_run(stale).unwrap().unwrap();
     assert_eq!(stale_run.status, "failed");

@@ -35,6 +35,14 @@ pub struct FlowDefinition {
     /// byte-identically.
     #[serde(default = "default_queue", skip_serializing_if = "is_local_queue")]
     pub queue: String,
+    /// Retry policy when a run is lost because its executing worker vanished
+    /// (its lease lapsed and the reaper reclaimed it). Absent means a single
+    /// attempt — a lost run fails. Opting in asserts the flow is safe to
+    /// re-run from scratch (idempotent): a retried run re-executes every task
+    /// from the top against the same `flow_rev`. Omitted from serialization
+    /// when absent so existing flows round-trip byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_worker_loss: Option<OnWorkerLoss>,
     /// Run parameters supplied at trigger time.
     #[serde(default)]
     pub inputs: Vec<InputDef>,
@@ -187,6 +195,19 @@ pub struct PluginTask {
     pub config: Value,
     /// Values extracted from the plugin result for downstream tasks.
     pub outputs: Vec<OutputDef>,
+}
+
+/// Run-level retry when the executing worker is lost (its lease is reaped).
+/// Distinct from [`RetryPolicy`], which retries a single task *within* a live
+/// run; this re-dispatches the whole run from scratch after the worker
+/// running it disappears. See [`FlowDefinition::on_worker_loss`].
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct OnWorkerLoss {
+    /// Total dispatch attempts including the first (1..=20). `1` means no
+    /// retry — a lost run fails immediately.
+    pub max_attempts: u32,
 }
 
 /// Exponential-backoff retry policy (`type: "exponential"` is the only kind

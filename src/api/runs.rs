@@ -177,10 +177,7 @@ fn launch_run(state: &AppState, flow: &FlowRow, inputs: Map<String, Value>) -> R
     if flow.paused {
         return ApiError::conflict("flow is paused").into_response();
     }
-    match state
-        .engine
-        .create_and_start(&flow.id, inputs, "manual", None)
-    {
+    match state.engine.create_run(&flow.id, inputs, "manual", None) {
         Ok(run_id) => Json(json!({ "run_id": run_id })).into_response(),
         Err(EngineError::InvalidInput(messages)) => {
             let errors: Vec<ValidationErr> = messages

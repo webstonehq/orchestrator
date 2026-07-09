@@ -24,10 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::engine::{Assignment, SeqUpdate};
 
 use super::{ApiError, AppState};
-
-/// Default lease length granted on claim/heartbeat. Comfortably longer than
-/// the worker's heartbeat cadence so a slow beat never drops a live run.
-const LEASE_SECS: i64 = 30;
+use crate::engine::LEASE_SECS;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -128,11 +125,15 @@ async fn updates(
     Json(body): Json<UpdatesBody>,
 ) -> Result<Json<UpdatesResponse>, ApiError> {
     authorize(&state, &headers)?;
-    for SeqUpdate { seq, update } in body.updates {
-        state
-            .engine
-            .apply_remote_update(body.run_id, seq, update)
-            .map_err(ApiError::internal)?;
+    // Ownership fence: a worker that no longer owns this run (it was reaped and
+    // requeued, then re-claimed by someone else) has its whole batch dropped
+    // and is told to stop — without renewing a lease it doesn't hold.
+    let owned = state
+        .engine
+        .apply_remote_batch(&body.worker_id, body.run_id, body.updates)
+        .map_err(ApiError::internal)?;
+    if !owned {
+        return Ok(Json(UpdatesResponse { canceled: true }));
     }
     // Renew the lease (a run producing updates is alive) and report whether
     // it has since been cancelled server-side.

@@ -80,6 +80,19 @@ pub fn validate(def: &FlowDefinition, registry: &PluginRegistry) -> Vec<Validati
         );
     }
 
+    if let Some(owl) = &def.on_worker_loss
+        && !(1..=20).contains(&owl.max_attempts)
+    {
+        push(
+            &mut errs,
+            "on_worker_loss.max_attempts",
+            format!(
+                "max_attempts must be between 1 and 20, got {}",
+                owl.max_attempts
+            ),
+        );
+    }
+
     let input_ids = validate_inputs(def, &mut errs);
     let var_ids = validate_variables(def, &mut errs);
     let env_names = validate_env(def, &mut errs);

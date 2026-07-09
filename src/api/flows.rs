@@ -315,10 +315,7 @@ async fn run_flow(
             "invalid trigger `{trigger}`: must be `manual` or `api`"
         )));
     }
-    match state
-        .engine
-        .create_and_start(&id, body.inputs, trigger, None)
-    {
+    match state.engine.create_run(&id, body.inputs, trigger, None) {
         Ok(run_id) => Ok(Json(json!({ "run_id": run_id })).into_response()),
         Err(EngineError::InvalidInput(messages)) => {
             let errors: Vec<ValidationErr> = messages

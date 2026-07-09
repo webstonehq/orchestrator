@@ -43,6 +43,7 @@ fn flow_with_tasks(tasks: Vec<TaskDef>) -> FlowDefinition {
         name: "test-flow".to_string(),
         namespace: "default".to_string(),
         queue: "local".to_string(),
+        on_worker_loss: None,
         description: String::new(),
         inputs: vec![],
         variables: vec![],
@@ -67,6 +68,7 @@ fn example_flow() -> FlowDefinition {
         name: "council-alert-pipeline".to_string(),
         namespace: "default".to_string(),
         queue: "local".to_string(),
+        on_worker_loss: None,
         description: String::new(),
         inputs: vec![InputDef {
             id: "provinces".to_string(),

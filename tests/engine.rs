@@ -1011,12 +1011,14 @@ async fn recover_interrupted_marks_running_rows_failed() {
         .unwrap();
     env.db.upsert_task_run(run_id, "t1", "running", 1).unwrap();
 
-    let changed = env.engine.recover_interrupted().unwrap();
-    assert!(changed >= 2, "expected ≥2 rows changed, got {changed}");
+    // At startup every in-flight (leased/running) run is lost. This flow has
+    // no retry policy, so it is failed and its running task failed too.
+    let failed = env.engine.recover_on_startup().unwrap();
+    assert_eq!(failed, vec![run_id]);
 
     let run = env.db.get_run(run_id).unwrap().unwrap();
     assert_eq!(run.status, "failed");
-    assert_eq!(run.error.as_deref(), Some("interrupted by shutdown"));
+    assert_eq!(run.error.as_deref(), Some("worker lost (lease expired)"));
     let tasks = env.db.list_task_runs(run_id).unwrap();
     assert_eq!(task_run(&tasks, "t1").status, "failed");
 }

@@ -60,6 +60,13 @@ pub fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// Whether a `runs.status` value is terminal — the run has finished and its
+/// row must never be mutated again (`success`/`degraded`/`failed`/`canceled`,
+/// per the `runs.status` schema comment).
+pub fn is_terminal_run_status(status: &str) -> bool {
+    matches!(status, "success" | "degraded" | "failed" | "canceled")
+}
+
 /// An RFC3339 timestamp `lease_secs` in the future, in the storage format.
 fn lease_deadline(lease_secs: i64) -> String {
     (chrono::Utc::now() + chrono::Duration::seconds(lease_secs))
@@ -196,6 +203,14 @@ CREATE TABLE sessions (
 CREATE INDEX idx_sessions_expires ON sessions(expires_at);
 "#;
 
+/// Adds `attempt` to runs: how many times this run has been (re)dispatched.
+/// `0` is the first attempt. Incremented when the reaper requeues a run whose
+/// worker was lost, up to the flow's `on_worker_loss.max_attempts`. Existing
+/// rows backfill to 0.
+const MIGRATION_006: &str = r#"
+ALTER TABLE runs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0;
+"#;
+
 /// Embedded migrations, applied in order; versions recorded in `migrations`.
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, MIGRATION_001),
@@ -203,6 +218,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (3, MIGRATION_003),
     (4, MIGRATION_004),
     (5, MIGRATION_005),
+    (6, MIGRATION_006),
 ];
 
 // ---------------------------------------------------------------------------
@@ -257,6 +273,9 @@ pub struct RunRow {
     pub lease_expires_at: Option<String>,
     /// Highest per-run update sequence number applied (worker reporting).
     pub last_seq: i64,
+    /// Dispatch attempt (0 = first). Bumped when the reaper requeues a run
+    /// whose worker was lost, up to the flow's `on_worker_loss.max_attempts`.
+    pub attempt: i64,
 }
 
 /// Mirrors storage, not API shape — parse JSON text columns (`result`,
@@ -428,9 +447,9 @@ impl Db {
             // biggest write-throughput lever (no per-commit fsync), and it is
             // safe here — a power/OS crash can lose transactions committed since
             // the last checkpoint but never corrupts the database, and runs
-            // in-flight at an unclean shutdown are already marked failed
-            // ("interrupted") on the next startup (see `mark_interrupted`), so
-            // losing their last few status writes changes nothing observable.
+            // in-flight at an unclean shutdown are resolved (requeued or failed)
+            // by startup recovery (see `Engine::recover_on_startup`), so losing
+            // their last few status writes changes nothing observable.
             conn.pragma_update(None, "synchronous", "NORMAL")?;
             conn.pragma_update(None, "foreign_keys", "ON")?;
             Ok(())
@@ -729,7 +748,7 @@ impl Db {
         Ok(conn
             .query_row(
                 "SELECT id, flow_id, flow_rev, status, trigger, inputs, queue, scheduled_for, \
-                 started_at, finished_at, error, worker_id, lease_expires_at, last_seq FROM runs WHERE id = ?1",
+                 started_at, finished_at, error, worker_id, lease_expires_at, last_seq, attempt FROM runs WHERE id = ?1",
                 [id],
                 map_run,
             )
@@ -770,7 +789,7 @@ impl Db {
         params_vec.push(&offset);
         let mut stmt = conn.prepare(&format!(
             "SELECT id, flow_id, flow_rev, status, trigger, inputs, queue, scheduled_for, \
-             started_at, finished_at, error, worker_id, lease_expires_at, last_seq FROM runs WHERE {where_sql} \
+             started_at, finished_at, error, worker_id, lease_expires_at, last_seq, attempt FROM runs WHERE {where_sql} \
              ORDER BY id DESC LIMIT ? OFFSET ?"
         ))?;
         let rows = stmt
@@ -789,6 +808,37 @@ impl Db {
             })?
             .collect::<Result<HashMap<_, _>, _>>()?;
         Ok(rows)
+    }
+
+    /// Whether `run_id` has reached a durably terminal status (see
+    /// [`is_terminal_run_status`]). A missing run counts as non-terminal.
+    ///
+    /// Used to fence out late worker updates: once the reaper (or a normal
+    /// finish) has settled a run, a worker that reconnects after being reaped
+    /// must not be able to flush its buffered updates and resurrect it.
+    pub fn run_is_terminal(&self, run_id: i64) -> DbResult<bool> {
+        let conn = self.conn()?;
+        let status: Option<String> = conn
+            .query_row("SELECT status FROM runs WHERE id = ?1", [run_id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(status.as_deref().is_some_and(is_terminal_run_status))
+    }
+
+    /// Whether `worker_id` is the current lease owner of `run_id`. Fences out
+    /// updates from a worker that was reaped and replaced: once a lost run has
+    /// been requeued and re-claimed by another worker (or cleared to no owner),
+    /// the stale worker's buffered updates must not land on the new attempt.
+    /// A missing run is not owned by anyone.
+    pub fn worker_owns_run(&self, worker_id: &str, run_id: i64) -> DbResult<bool> {
+        let conn = self.conn()?;
+        let owner: Option<Option<String>> = conn
+            .query_row("SELECT worker_id FROM runs WHERE id = ?1", [run_id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(matches!(owner, Some(Some(w)) if w == worker_id))
     }
 
     /// Update a run's status and error. See [`RunStatusUpdate`] for which
@@ -867,13 +917,46 @@ impl Db {
         let rows = {
             let mut stmt = tx.prepare(&format!(
                 "SELECT id, flow_id, flow_rev, status, trigger, inputs, queue, scheduled_for, \
-                 started_at, finished_at, error, worker_id, lease_expires_at, last_seq FROM runs WHERE id IN ({id_list}) ORDER BY id"
+                 started_at, finished_at, error, worker_id, lease_expires_at, last_seq, attempt FROM runs WHERE id IN ({id_list}) ORDER BY id"
             ))?;
             stmt.query_map([], map_run)?
                 .collect::<Result<Vec<_>, _>>()?
         };
         tx.commit()?;
         Ok(rows)
+    }
+
+    /// Atomically lease one specific `queued` run to `worker_id` (a targeted
+    /// claim, e.g. the in-process worker starting a named run). Returns the
+    /// leased row, or `None` if it was not `queued` — already claimed or
+    /// finished (the caller lost the race). Same lease semantics as
+    /// [`Db::claim_runs`].
+    pub fn claim_run(
+        &self,
+        run_id: i64,
+        worker_id: &str,
+        lease_secs: i64,
+    ) -> DbResult<Option<RunRow>> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let n = tx.execute(
+            "UPDATE runs SET status = 'leased', worker_id = ?2, lease_expires_at = ?3 \
+             WHERE id = ?1 AND status = 'queued'",
+            params![run_id, worker_id, lease_deadline(lease_secs)],
+        )?;
+        if n == 0 {
+            tx.commit()?;
+            return Ok(None);
+        }
+        let row = tx.query_row(
+            "SELECT id, flow_id, flow_rev, status, trigger, inputs, queue, scheduled_for, \
+             started_at, finished_at, error, worker_id, lease_expires_at, last_seq, attempt \
+             FROM runs WHERE id = ?1",
+            [run_id],
+            map_run,
+        )?;
+        tx.commit()?;
+        Ok(Some(row))
     }
 
     /// Extend the lease deadline of `worker_id`'s active runs to
@@ -901,43 +984,83 @@ impl Db {
         Ok(n as u64)
     }
 
-    /// Reap runs whose worker lease has lapsed: `leased`/`running` runs with
-    /// `lease_expires_at < now` are failed ("worker lost (lease expired)"),
-    /// their unfinished task_runs failed and items canceled — mirroring
-    /// [`Db::mark_interrupted`]. Returns the ids of the reaped runs.
-    pub fn reap_expired_leases(&self, now: &str) -> DbResult<Vec<i64>> {
+    /// Full rows of runs whose worker lease has lapsed (`leased`/`running`
+    /// with `lease_expires_at < now`). The reaper reads these, then decides
+    /// per run whether to requeue for a fresh attempt or fail, via
+    /// [`Db::requeue_lost_run`] / [`Db::fail_lost_run`].
+    pub fn expired_lease_runs(&self, now: &str) -> DbResult<Vec<RunRow>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, flow_id, flow_rev, status, trigger, inputs, queue, scheduled_for, \
+             started_at, finished_at, error, worker_id, lease_expires_at, last_seq, attempt \
+             FROM runs WHERE status IN ('leased', 'running') \
+             AND lease_expires_at IS NOT NULL AND lease_expires_at < ?1 ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([now], map_run)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Fail a run whose worker was lost: the run and its unfinished task_runs
+    /// are failed ("worker lost (lease expired)") and their items canceled.
+    /// Guarded on the run still being
+    /// `leased`/`running`, so a run that finished or was canceled between
+    /// selection and here is left alone. Returns whether it acted.
+    pub fn fail_lost_run(&self, id: i64, now: &str) -> DbResult<bool> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let ids: Vec<i64> = {
-            let mut stmt = tx.prepare(
-                "SELECT id FROM runs WHERE status IN ('leased', 'running') \
-                 AND lease_expires_at IS NOT NULL AND lease_expires_at < ?1",
-            )?;
-            stmt.query_map([now], |r| r.get(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        for id in &ids {
-            tx.execute(
-                "UPDATE runs SET status = 'failed', error = 'worker lost (lease expired)', \
-                 finished_at = COALESCE(finished_at, ?2) WHERE id = ?1",
-                params![id, now],
-            )?;
-            tx.execute(
-                "UPDATE task_runs SET status = 'failed', error = 'worker lost (lease expired)', \
-                 finished_at = COALESCE(finished_at, ?2) \
-                 WHERE run_id = ?1 AND status IN ('pending', 'queued', 'running')",
-                params![id, now],
-            )?;
-            tx.execute(
-                "UPDATE task_run_items SET status = 'canceled', \
-                 finished_at = COALESCE(finished_at, ?2) \
-                 WHERE task_run_id IN (SELECT id FROM task_runs WHERE run_id = ?1) \
-                 AND status IN ('queued', 'running')",
-                params![id, now],
-            )?;
+        let n = tx.execute(
+            "UPDATE runs SET status = 'failed', error = 'worker lost (lease expired)', \
+             finished_at = COALESCE(finished_at, ?2) \
+             WHERE id = ?1 AND status IN ('leased', 'running')",
+            params![id, now],
+        )?;
+        if n == 0 {
+            tx.commit()?;
+            return Ok(false);
         }
+        tx.execute(
+            "UPDATE task_runs SET status = 'failed', error = 'worker lost (lease expired)', \
+             finished_at = COALESCE(finished_at, ?2) \
+             WHERE run_id = ?1 AND status IN ('pending', 'queued', 'running')",
+            params![id, now],
+        )?;
+        tx.execute(
+            "UPDATE task_run_items SET status = 'canceled', \
+             finished_at = COALESCE(finished_at, ?2) \
+             WHERE task_run_id IN (SELECT id FROM task_runs WHERE run_id = ?1) \
+             AND status IN ('queued', 'running')",
+            params![id, now],
+        )?;
         tx.commit()?;
-        Ok(ids)
+        Ok(true)
+    }
+
+    /// Requeue a run whose worker was lost, for a fresh attempt: reset it to
+    /// `queued` with `attempt = next_attempt`, clear the lease/worker/seq and
+    /// prior timing, and delete the previous attempt's task_runs (items
+    /// cascade) so a fresh attempt re-creates them from the top. Guarded on
+    /// the run still being `leased`/`running`, so a cancel landing between
+    /// selection and here wins (a canceled run is never requeued). Returns
+    /// whether it acted.
+    pub fn requeue_lost_run(&self, id: i64, next_attempt: i64) -> DbResult<bool> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let n = tx.execute(
+            "UPDATE runs SET status = 'queued', attempt = ?2, worker_id = NULL, \
+             lease_expires_at = NULL, last_seq = 0, started_at = NULL, error = NULL, \
+             finished_at = NULL \
+             WHERE id = ?1 AND status IN ('leased', 'running')",
+            params![id, next_attempt],
+        )?;
+        if n == 0 {
+            tx.commit()?;
+            return Ok(false);
+        }
+        tx.execute("DELETE FROM task_runs WHERE run_id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// In-flight run count per worker: `leased`/`running` runs grouped by
@@ -1333,33 +1456,34 @@ impl Db {
 
     // -- recovery ----------------------------------------------------------------
 
-    /// Startup recovery after an unclean shutdown: queued/running runs and
-    /// pending/queued/running task_runs become `failed` with error
-    /// "interrupted by shutdown"; queued/running items become `canceled`.
-    /// Missing `finished_at` values are stamped with now. Returns the total
-    /// number of rows changed across all three tables.
-    pub fn mark_interrupted(&self) -> DbResult<u64> {
-        let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
-        let now = now_rfc3339();
-        let mut changed = tx.execute(
-            "UPDATE runs SET status = 'failed', error = 'interrupted by shutdown', \
-             finished_at = COALESCE(finished_at, ?1) WHERE status IN ('queued', 'running')",
-            [&now],
+    /// Ids of the `leased`/`running` runs a worker currently holds. Feeds the
+    /// in-process worker's free-slot accounting and lease heartbeat.
+    pub fn in_flight_run_ids(&self, worker_id: &str) -> DbResult<Vec<i64>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id FROM runs WHERE worker_id = ?1 AND status IN ('leased', 'running')",
         )?;
-        changed += tx.execute(
-            "UPDATE task_runs SET status = 'failed', error = 'interrupted by shutdown', \
-             finished_at = COALESCE(finished_at, ?1) \
-             WHERE status IN ('pending', 'queued', 'running')",
-            [&now],
+        let ids = stmt
+            .query_map([worker_id], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
+    /// Full rows of every `leased`/`running` run, regardless of lease expiry.
+    /// Used at startup: after an unclean shutdown no worker has re-established
+    /// anything, so all in-flight runs are lost and get resolved (requeued or
+    /// failed) by the engine.
+    pub fn all_in_flight_runs(&self) -> DbResult<Vec<RunRow>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, flow_id, flow_rev, status, trigger, inputs, queue, scheduled_for, \
+             started_at, finished_at, error, worker_id, lease_expires_at, last_seq, attempt \
+             FROM runs WHERE status IN ('leased', 'running') ORDER BY id",
         )?;
-        changed += tx.execute(
-            "UPDATE task_run_items SET status = 'canceled', \
-             finished_at = COALESCE(finished_at, ?1) WHERE status IN ('queued', 'running')",
-            [&now],
-        )?;
-        tx.commit()?;
-        Ok(changed as u64)
+        let rows = stmt
+            .query_map([], map_run)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     // -- dashboard ------------------------------------------------------------------
@@ -1567,6 +1691,7 @@ fn map_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         worker_id: r.get(11)?,
         lease_expires_at: r.get(12)?,
         last_seq: r.get(13)?,
+        attempt: r.get(14)?,
     })
 }
 

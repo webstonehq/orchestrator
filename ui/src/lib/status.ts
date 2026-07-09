@@ -24,7 +24,10 @@ export const STATUS: Record<Status, StatusStyle> = {
 	degraded: { color: '#e3b341', bg: 'rgba(227,179,65,.12)', label: 'Degraded' },
 	running: { color: '#58a6ff', bg: 'rgba(88,166,255,.12)', label: 'Running' },
 	failed: { color: '#f85149', bg: 'rgba(248,81,73,.12)', label: 'Failed' },
-	queued: { color: '#e3b341', bg: 'rgba(227,179,65,.12)', label: 'Queued' },
+	// waiting for a worker to claim it — the normal first state of every run
+	// (local and remote). A calm slate-blue: distinct from amber `degraded` and
+	// from cyan `running`, reads as healthy/pending, not a warning.
+	queued: { color: '#6c8fb5', bg: 'rgba(108,143,181,.14)', label: 'Queued' },
 	pending: { color: '#5a6675', bg: 'rgba(90,102,117,.10)', label: 'Pending' },
 	canceled: { color: '#8a95a6', bg: 'rgba(138,149,166,.12)', label: 'Canceled' },
 	// task_runs only: dimmer gray than canceled (--dim palette, like pending)

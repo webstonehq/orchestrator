@@ -16,6 +16,11 @@ pub struct Config {
     /// Accepted worker bearer tokens (from `--worker-token` and
     /// `ORCH_WORKER_TOKENS`). Empty disables the worker API.
     pub worker_tokens: Vec<String>,
+    /// Concurrency of the server's in-process worker — how many `local`-queue
+    /// runs it executes at once. From `ORCH_LOCAL_CAPACITY` (default 8). `0`
+    /// disables the in-process worker entirely (pure control plane; all
+    /// execution goes to remote workers).
+    pub local_capacity: u32,
 }
 
 impl Config {
@@ -49,6 +54,13 @@ impl Config {
         worker_tokens.sort();
         worker_tokens.dedup();
 
+        // In-process worker concurrency. Invalid values fall back to the
+        // default rather than failing startup.
+        let local_capacity = std::env::var("ORCH_LOCAL_CAPACITY")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(8);
+
         let (db_path, key_path) = match (db, key) {
             (Some(db), Some(key)) => (db, key),
             (db, key) => {
@@ -64,6 +76,7 @@ impl Config {
             db_path,
             key_path,
             worker_tokens,
+            local_capacity,
         })
     }
 }

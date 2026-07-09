@@ -114,8 +114,14 @@ async fn post(env: &Env, uri: &str) -> (StatusCode, Value) {
 async fn wait_for_finish(env: &Env, run_id: i64) -> orchestrator::db::RunRow {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
+        // Drive the in-process worker: the API only enqueues runs, so pump a
+        // claim each poll (as the server's local-worker loop does in prod).
+        env.engine.claim_local(64).expect("claim local");
         let run = env.db.get_run(run_id).expect("get run").expect("run row");
-        if matches!(run.status.as_str(), "success" | "failed" | "canceled") {
+        if matches!(
+            run.status.as_str(),
+            "success" | "degraded" | "failed" | "canceled"
+        ) {
             return run;
         }
         assert!(

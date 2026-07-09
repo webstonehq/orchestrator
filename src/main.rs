@@ -142,18 +142,15 @@ enum SecretsAction {
     },
 }
 
-/// [`RunLauncher`] backed by the engine: the scheduler inserts queued run
-/// rows itself, then hands the ids here. `Engine::start`'s run-start input
-/// finalization applies defaults, so scheduler runs need no create-time
-/// input resolution.
-struct EngineLauncher(Arc<Engine>);
+/// [`RunLauncher`] backed by the engine. The scheduler inserts a `queued` run
+/// row and calls this; under the unified claim/lease model there is nothing
+/// more to do — a worker (the in-process one, or a remote worker on the flow's
+/// queue) picks the row up on its next claim. Kept as a hook for future
+/// wake-on-enqueue.
+struct EngineLauncher(#[allow(dead_code)] Arc<Engine>);
 
 impl RunLauncher for EngineLauncher {
-    fn launch(&self, run_id: i64) {
-        if let Err(e) = self.0.start(run_id) {
-            tracing::warn!(run_id, error = %e, "scheduler: failed to start run");
-        }
-    }
+    fn launch(&self, _run_id: i64) {}
 }
 
 #[tokio::main]
@@ -247,11 +244,13 @@ async fn serve(
     };
     let engine = Engine::new(db.clone(), Arc::clone(&registry), Arc::clone(&secrets));
 
-    // Startup recovery: runs left queued/running by an unclean shutdown are
-    // marked failed ("interrupted by shutdown").
-    let recovered = engine.recover_interrupted()?;
-    if recovered > 0 {
-        tracing::info!("recovered {recovered} interrupted runs");
+    // Startup recovery: after an unclean shutdown every in-flight (leased/
+    // running) run is lost — resolve them uniformly (requeue if the flow opts
+    // into retry, else fail). Must run before the in-process worker's first
+    // claim so a crashed run is requeued before it can be re-claimed.
+    let recovered = engine.recover_on_startup()?;
+    if !recovered.is_empty() {
+        tracing::info!("recovered {} interrupted runs", recovered.len());
     }
 
     // Scheduler: reconcile schedule state at startup, then spawn the loop.
@@ -266,14 +265,32 @@ async fn serve(
     let shutdown = CancellationToken::new();
     tokio::spawn(Arc::clone(&scheduler).run(shutdown.clone()));
 
-    // Reaper: fail runs whose worker lease has lapsed (only relevant when
-    // workers are enabled, but harmless otherwise).
+    // Reaper: resolve runs whose worker lease has lapsed (requeue or fail).
+    // Always on now — the in-process worker's own runs carry leases too, so
+    // this is the single recovery path for both local and remote losses.
+    tokio::spawn(reaper(Arc::clone(&engine), shutdown.clone()));
     if !config.worker_tokens.is_empty() {
         tracing::info!(
             "worker API enabled ({} token(s))",
             config.worker_tokens.len()
         );
-        tokio::spawn(reaper(Arc::clone(&engine), shutdown.clone()));
+    }
+
+    // In-process worker: claims and executes `local`-queue runs, the local
+    // peer of a remote worker. `local_capacity == 0` disables it (pure control
+    // plane; all execution goes to remote workers).
+    if config.local_capacity > 0 {
+        tracing::info!(
+            capacity = config.local_capacity,
+            "in-process worker enabled"
+        );
+        tokio::spawn(local_worker(
+            Arc::clone(&engine),
+            config.local_capacity,
+            shutdown.clone(),
+        ));
+    } else {
+        tracing::info!("in-process worker disabled (ORCH_LOCAL_CAPACITY=0)");
     }
 
     // HTTP: JSON API + health + embedded UI (registered routes win over the
@@ -295,8 +312,9 @@ async fn serve(
     tracing::info!("listening on http://{}", listener.local_addr()?);
 
     // Graceful shutdown: ctrl-c cancels the shutdown token (stopping the
-    // scheduler loop) and the server drains. Active runs are left as-is;
-    // `recover_interrupted` marks their rows failed on the next startup.
+    // scheduler, reaper, and in-process worker) and the server drains. Active
+    // runs are left as-is; their leases lapse and startup recovery resolves
+    // them (requeue or fail) on the next boot.
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             match tokio::signal::ctrl_c().await {
@@ -306,7 +324,7 @@ async fn serve(
             shutdown.cancel();
             let active = engine.active_run_count();
             tracing::info!(
-                "shutting down ({active} runs active — they will be marked interrupted on next startup)"
+                "shutting down ({active} runs active — their leases will lapse and be resolved on next startup)"
             );
         })
         .await?;
@@ -317,7 +335,8 @@ async fn health() -> Json<serde_json::Value> {
     Json(json!({"ok": true}))
 }
 
-/// Periodically fail runs whose worker lease has lapsed. Runs until `shutdown`.
+/// Periodically resolve runs whose worker lease has lapsed (requeue or fail).
+/// Runs until `shutdown`.
 async fn reaper(engine: Arc<Engine>, shutdown: CancellationToken) {
     loop {
         tokio::select! {
@@ -326,10 +345,34 @@ async fn reaper(engine: Arc<Engine>, shutdown: CancellationToken) {
         }
         match engine.reap_lost_runs() {
             Ok(ids) if !ids.is_empty() => {
-                tracing::warn!(count = ids.len(), "reaped runs with expired worker leases")
+                tracing::warn!(count = ids.len(), "failed runs with expired worker leases")
             }
             Ok(_) => {}
             Err(e) => tracing::error!(error = %e, "reaper failed"),
+        }
+    }
+}
+
+/// The server's in-process worker: claims `local`-queue runs up to `capacity`
+/// and executes them, heartbeating their leases each cycle. The local peer of
+/// a remote worker, sharing the same claim/lease protocol. Runs until
+/// `shutdown`.
+async fn local_worker(engine: Arc<Engine>, capacity: u32, shutdown: CancellationToken) {
+    /// Poll cadence. Comfortably below [`orchestrator::engine::LEASE_SECS`] so
+    /// a held run's lease never lapses between heartbeats.
+    const POLL: Duration = Duration::from_secs(1);
+    loop {
+        match engine.claim_local(capacity) {
+            Ok(n) if n > 0 => tracing::debug!(claimed = n, "in-process worker claimed runs"),
+            Ok(_) => {}
+            Err(e) => tracing::error!(error = %e, "in-process worker claim failed"),
+        }
+        if let Err(e) = engine.heartbeat_local() {
+            tracing::error!(error = %e, "in-process worker heartbeat failed");
+        }
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(POLL) => {}
         }
     }
 }
