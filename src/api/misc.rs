@@ -4,14 +4,13 @@ use std::collections::HashMap;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post, put};
+use axum::routing::{get, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::model::FlowDefinition;
 use crate::plugins::PluginManifest;
-use crate::scheduler::SchedulerError;
 use crate::secrets::SecretsError;
 
 use super::flows::humanize_cron;
@@ -23,14 +22,8 @@ pub fn router() -> Router<AppState> {
         .route("/flow.schema.json", get(flow_schema))
         .route("/dashboard", get(dashboard))
         .route("/schedules", get(schedules))
-        .route("/schedules/{flow}/{trigger}/toggle", post(toggle_schedule))
         .route("/secrets", get(list_secrets))
         .route("/secrets/{name}", put(put_secret).delete(delete_secret))
-}
-
-#[derive(Deserialize)]
-struct ToggleBody {
-    enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -105,21 +98,6 @@ async fn schedules(State(state): State<AppState>) -> Result<Json<Value>, ApiErro
         }));
     }
     Ok(Json(Value::Array(out)))
-}
-
-async fn toggle_schedule(
-    State(state): State<AppState>,
-    Path((flow, trigger)): Path<(String, String)>,
-    Json(body): Json<ToggleBody>,
-) -> Result<StatusCode, ApiError> {
-    // set_enabled pokes the scheduler's notify itself.
-    match state.scheduler.set_enabled(&flow, &trigger, body.enabled) {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(e @ (SchedulerError::UnknownFlow(_) | SchedulerError::UnknownTrigger { .. })) => {
-            Err(ApiError::new(StatusCode::NOT_FOUND, e.to_string()))
-        }
-        Err(e) => Err(ApiError::internal(e)),
-    }
 }
 
 async fn list_secrets(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {

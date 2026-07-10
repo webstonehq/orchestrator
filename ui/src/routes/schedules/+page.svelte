@@ -5,7 +5,6 @@
 	import { toast } from '$lib/toast';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import StatusPill from '$lib/components/StatusPill.svelte';
-	import Toggle from '$lib/components/Toggle.svelte';
 
 	breadcrumb.set(['schedules']);
 
@@ -15,22 +14,35 @@
 	let loadError: string | null = $state(null);
 	let retryNonce = $state(0);
 
-	// Toggle generation counter. Bumped when a toggle starts *and* when it
-	// settles; a poll response is only applied if the generation it started
-	// under is still current. This drops both polls in flight during a toggle
-	// and polls that started before the toggle (whose server snapshot may
-	// predate the PUT) but land after it settles.
-	let toggleGen = 0;
+	// A schedule only has a meaningful "next run" when it will actually fire.
+	// A disabled schedule keeps a frozen next_fire_at (the scheduler never
+	// advances disabled rows), which drifts into the past — so there is no
+	// upcoming run to show.
+	const nextRun = (s: ScheduleView) => (s.enabled ? s.next_fire_at : null);
+
+	// Read-only summary sorted by "up next": enabled schedules with a next
+	// fire time first (soonest at the top), then disabled ones (no effective
+	// next run) at the bottom, alphabetically by flow.
+	const sorted = $derived.by(() => {
+		if (schedules === null) return null;
+		return [...schedules].sort((a, b) => {
+			const na = nextRun(a);
+			const nb = nextRun(b);
+			if (na && nb) return na < nb ? -1 : na > nb ? 1 : 0;
+			if (na) return -1;
+			if (nb) return 1;
+			return a.flow_name.localeCompare(b.flow_name);
+		});
+	});
 
 	$effect(() => {
 		void retryNonce;
 		let disposed = false;
 
 		const load = async () => {
-			const gen = toggleGen;
 			try {
 				const data = await api.schedules.list();
-				if (disposed || gen !== toggleGen) return;
+				if (disposed) return;
 				schedules = data;
 				loadError = null;
 			} catch (err) {
@@ -51,21 +63,6 @@
 			clearInterval(timer);
 		};
 	});
-
-	async function toggleSchedule(s: ScheduleView, enabled: boolean) {
-		const prev = s.enabled;
-		s.enabled = enabled; // optimistic
-		toggleGen++;
-		try {
-			await api.schedules.toggle(s.flow_id, s.trigger_id, enabled);
-		} catch (err) {
-			s.enabled = prev; // revert
-			const message = err instanceof ApiError ? err.message : 'Failed to update schedule';
-			toast.error(`Schedule ${s.flow_name}: ${message}`);
-		} finally {
-			toggleGen++;
-		}
-	}
 </script>
 
 <svelte:head>
@@ -74,7 +71,10 @@
 
 <div class="page">
 	<h1 class="page-title">Schedules</h1>
-	<p class="page-desc">Cron triggers that queue flow executions automatically.</p>
+	<p class="page-desc">
+		Cron triggers across all flows, soonest first. Enable or disable a schedule
+		from its flow.
+	</p>
 
 	{#if schedules === null && loadError !== null}
 		<div class="error-box" role="alert">
@@ -110,7 +110,8 @@
 			</div>
 		{/if}
 		<div class="list">
-			{#each schedules as s (s.flow_id + '/' + s.trigger_id)}
+			{#each sorted ?? [] as s (s.flow_id + '/' + s.trigger_id)}
+				{@const next = nextRun(s)}
 				<div class="card" class:off={!s.enabled}>
 					<div class="icon-box">
 						<svg
@@ -137,7 +138,7 @@
 					<div class="kv">
 						<div class="kv-label">Next run</div>
 						<div class="kv-value">
-							{s.next_fire_at ? relativeTime(s.next_fire_at) : '—'}
+							{next ? relativeTime(next) : '—'}
 						</div>
 					</div>
 					<div class="kv">
@@ -154,18 +155,9 @@
 						catchup · {s.catchup}
 					</div>
 					<div class="spacer"></div>
-					<!-- `checked` is deliberately passed unbound: Toggle's $bindable flips
-					     its own local copy on click, and this prop only overwrites that
-					     copy when s.enabled *changes*. The optimistic write in
-					     toggleSchedule keeps s.enabled in sync with the local flip, so a
-					     failed API call's revert (s.enabled = prev) is a real change and
-					     snaps the knob back. Without the optimistic write, the revert
-					     would be a no-op prop value and the knob would stay flipped. -->
-					<Toggle
-						checked={s.enabled}
-						label="Toggle schedule {s.trigger_id} for {s.flow_name}"
-						onchange={(v) => void toggleSchedule(s, v)}
-					/>
+					<span class="state" class:on={s.enabled}>
+						{s.enabled ? 'enabled' : 'disabled'}
+					</span>
 				</div>
 			{/each}
 		</div>
@@ -290,6 +282,24 @@
 
 	.spacer {
 		flex: 1;
+	}
+
+	.state {
+		flex: 0 0 auto;
+		font: 600 10px 'IBM Plex Mono', monospace;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		color: var(--dim);
+		background: var(--panel3);
+		border: 1px solid var(--border2);
+		border-radius: 6px;
+		padding: 4px 9px;
+	}
+
+	.state.on {
+		color: var(--accent);
+		background: rgba(126, 231, 135, 0.08);
+		border-color: rgba(126, 231, 135, 0.2);
 	}
 
 	.skeleton-card {

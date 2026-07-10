@@ -477,9 +477,9 @@ export const api = {
 	},
 
 	schedules: {
-		list: () => get<ScheduleView[]>('/api/schedules'),
-		toggle: (flowId: string, triggerId: string, enabled: boolean) =>
-			post<void>(`/api/schedules/${e(flowId)}/${e(triggerId)}/toggle`, { enabled })
+		// Read-only summary: enabled state is owned by each flow's definition
+		// (edit it in the flow builder), so there is no toggle here.
+		list: () => get<ScheduleView[]>('/api/schedules')
 	},
 
 	secrets: {

@@ -386,6 +386,8 @@ fn subsecond_clock_fraction_does_not_drop_live_fires() {
 
 #[test]
 fn disabled_schedule_is_skipped_and_reenable_recomputes_from_now() {
+    // Enable/disable is driven entirely through the flow definition (the
+    // single source of truth), reconciled onto schedule_state.
     let h = harness("2026-01-01T00:30:00.000Z");
     seed_flow(
         &h.db,
@@ -393,7 +395,12 @@ fn disabled_schedule_is_skipped_and_reenable_recomputes_from_now() {
         json!([trigger("t1", "0 * * * *", "UTC", "all")]),
     );
     h.sched.reconcile_flow("f1").expect("reconcile");
-    h.sched.set_enabled("f1", "t1", false).expect("disable");
+
+    // Disable via the definition.
+    let mut off = trigger("t1", "0 * * * *", "UTC", "all");
+    off["enabled"] = json!(false);
+    seed_flow(&h.db, "f1", json!([off]));
+    h.sched.reconcile_flow("f1").expect("reconcile");
 
     // While disabled: tick skips entirely — no runs, next_fire_at untouched.
     h.clock.set("2026-01-01T05:30:00.000Z");
@@ -406,8 +413,10 @@ fn disabled_schedule_is_skipped_and_reenable_recomputes_from_now() {
         "next_fire_at must not advance while disabled"
     );
 
-    // Re-enable: next_fire_at recomputed strictly after now — no burst.
-    h.sched.set_enabled("f1", "t1", true).expect("enable");
+    // Re-enable via the definition: next_fire_at recomputed strictly after
+    // now — the disabled period is not replayed as a catch-up burst.
+    seed_flow(&h.db, "f1", json!([trigger("t1", "0 * * * *", "UTC", "all")]));
+    h.sched.reconcile_flow("f1").expect("reconcile");
     let state = row(&h.db, "f1", "t1");
     assert!(state.enabled);
     assert_eq!(
@@ -456,7 +465,7 @@ fn paused_flow_advances_state_without_firing() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn reconcile_adds_removes_and_preserves_toggle() {
+fn reconcile_adds_removes_and_syncs_enabled() {
     let h = harness("2026-01-01T00:30:00.000Z");
     seed_flow(
         &h.db,
@@ -464,23 +473,22 @@ fn reconcile_adds_removes_and_preserves_toggle() {
         json!([trigger("t1", "0 * * * *", "UTC", "latest")]),
     );
     h.sched.reconcile_flow("f1").expect("reconcile");
-    h.sched.set_enabled("f1", "t1", false).expect("disable t1");
 
-    // Definition gains t2: new row with a computed next_fire_at; the
-    // survivor keeps its enabled=false toggle.
+    // Definition disables t1 and gains t2: the survivor's enabled follows
+    // the definition (now false); t2 is a new enabled row with a computed
+    // next_fire_at.
+    let mut t1_off = trigger("t1", "0 * * * *", "UTC", "latest");
+    t1_off["enabled"] = json!(false);
     seed_flow(
         &h.db,
         "f1",
-        json!([
-            trigger("t1", "0 * * * *", "UTC", "latest"),
-            trigger("t2", "0 0 * * *", "UTC", "latest"),
-        ]),
+        json!([t1_off, trigger("t2", "0 0 * * *", "UTC", "latest")]),
     );
     h.sched.reconcile_flow("f1").expect("reconcile");
     let rows = flow_rows(&h.db, "f1");
     assert_eq!(rows.len(), 2);
     let t1 = row(&h.db, "f1", "t1");
-    assert!(!t1.enabled, "survivor keeps its enabled=false toggle");
+    assert!(!t1.enabled, "survivor's enabled follows the definition");
     let t2 = row(&h.db, "f1", "t2");
     assert!(t2.enabled);
     assert_eq!(t2.next_fire_at.as_deref(), Some("2026-01-02T00:00:00.000Z"));
@@ -505,6 +513,37 @@ fn reconcile_honors_definition_enabled_false_for_new_rows() {
     seed_flow(&h.db, "f1", json!([t]));
     h.sched.reconcile_flow("f1").expect("reconcile");
     assert!(!row(&h.db, "f1", "t1").enabled);
+}
+
+#[test]
+fn reconcile_syncs_enabled_from_definition_for_survivor() {
+    // The flow definition is the single source of truth for `enabled`:
+    // flipping a *pre-existing* trigger's `enabled` in the definition and
+    // reconciling must propagate to schedule_state (which the scheduler and
+    // the /schedules page both read), and it must then fire when due.
+    let h = harness("2026-01-01T00:30:00.000Z");
+    let mut disabled = trigger("t1", "0 * * * *", "UTC", "latest");
+    disabled["enabled"] = json!(false);
+    seed_flow(&h.db, "f1", json!([disabled]));
+    h.sched.reconcile_flow("f1").expect("reconcile");
+    assert!(!row(&h.db, "f1", "t1").enabled, "starts disabled");
+
+    // Enable the survivor trigger via the definition and reconcile again.
+    seed_flow(
+        &h.db,
+        "f1",
+        json!([trigger("t1", "0 * * * *", "UTC", "latest")]),
+    );
+    h.sched.reconcile_flow("f1").expect("reconcile");
+    assert!(
+        row(&h.db, "f1", "t1").enabled,
+        "survivor's enabled must follow the definition"
+    );
+
+    // ...and it now fires at the next hour.
+    h.clock.set("2026-01-01T01:00:00.000Z");
+    let ids = h.sched.tick_once().expect("tick");
+    assert_eq!(ids.len(), 1, "enabled survivor fires when due");
 }
 
 #[test]

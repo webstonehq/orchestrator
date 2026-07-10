@@ -1347,8 +1347,10 @@ impl Db {
 
     /// Sync schedule_state with a flow's current triggers: insert missing
     /// rows (enabled, with the given `next_fire_at`), delete rows whose
-    /// trigger no longer exists, and leave surviving rows completely
-    /// untouched (`enabled`, `last_fired_at`, and `next_fire_at` preserved).
+    /// trigger no longer exists, and leave surviving rows untouched here
+    /// (`enabled`, `last_fired_at`, and `next_fire_at` preserved). The
+    /// scheduler's `reconcile_definition` then overwrites each survivor's
+    /// `enabled` from the definition and may recompute `next_fire_at`.
     pub fn reconcile_schedules(
         &self,
         flow_id: &str,

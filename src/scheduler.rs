@@ -37,19 +37,25 @@
 //!   Otherwise unpausing would trigger a stale catch-up burst covering the
 //!   whole paused period. `last_fired_at` is left untouched — nothing fired.
 //! - **Disabled schedules** are skipped entirely: `next_fire_at` is *not*
-//!   advanced while disabled. [`Scheduler::set_enabled`]`(.., true)`
-//!   recomputes `next_fire_at` strictly after now, so no catch-up burst
-//!   happens across the disabled period.
+//!   advanced while disabled. Re-enabling (via reconcile, below) recomputes
+//!   `next_fire_at` strictly after now, so no catch-up burst happens across
+//!   the disabled period.
+//! - **Enabled is owned by the definition.** The flow definition's
+//!   `enabled` flag is the single source of truth; `schedule_state.enabled`
+//!   is a mirror the scheduler and the read-only `/schedules` page read.
+//!   [`Scheduler::reconcile_flow`] is the only writer.
 //! - **Reconcile** ([`Scheduler::reconcile_flow`]) syncs `schedule_state`
 //!   with the flow's current definition: new triggers get a fresh row (with
-//!   `next_fire_at` = next occurrence after now, honouring the definition's
-//!   `enabled` flag), removed triggers lose their row, and survivors keep
-//!   their `enabled` toggle. A survivor's stored `next_fire_at` is preserved
-//!   iff it is still an occurrence of the *current* cron in the current
-//!   timezone (checked with `is_time_matching`); otherwise it is recomputed
-//!   to the next occurrence after now. A stored occurrence in the *past* that
-//!   still matches the cron is deliberately preserved so that startup
-//!   reconciliation does not erase the catch-up window.
+//!   `next_fire_at` = next occurrence after now), removed triggers lose their
+//!   row, and every surviving row's `enabled` is set from the definition. A
+//!   survivor flipping disabled -> enabled recomputes `next_fire_at` strictly
+//!   after now (no catch-up burst across the disabled period). Otherwise a
+//!   survivor's stored `next_fire_at` is preserved iff it is still an
+//!   occurrence of the *current* cron in the current timezone (checked with
+//!   `is_time_matching`); otherwise it is recomputed to the next occurrence
+//!   after now. A stored occurrence in the *past* that still matches the cron
+//!   is deliberately preserved so that startup reconciliation does not erase
+//!   the catch-up window.
 //! - **Stale state rows** (trigger id no longer in the definition) found at
 //!   tick time are deleted by re-reconciling the flow, without firing.
 
@@ -459,40 +465,6 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Toggle a schedule. Re-enabling recomputes `next_fire_at` to the next
-    /// occurrence strictly after now, so the disabled period is never
-    /// caught up. Disabling leaves `next_fire_at` untouched (ticks skip
-    /// disabled rows entirely).
-    pub fn set_enabled(
-        &self,
-        flow_id: &str,
-        trigger_id: &str,
-        enabled: bool,
-    ) -> Result<(), SchedulerError> {
-        let flow = self
-            .db
-            .get_flow(flow_id)?
-            .ok_or_else(|| SchedulerError::UnknownFlow(flow_id.to_string()))?;
-        let def = parse_definition(flow_id, &flow.definition)?;
-        let trigger = def
-            .triggers
-            .iter()
-            .find(|t| t.id == trigger_id)
-            .ok_or_else(|| SchedulerError::UnknownTrigger {
-                flow_id: flow_id.to_string(),
-                trigger_id: trigger_id.to_string(),
-            })?;
-        self.db.set_schedule_enabled(flow_id, trigger_id, enabled)?;
-        if enabled {
-            let (cron, tz) = self.parse_trigger(flow_id, trigger)?;
-            let next = next_occurrence(&cron, tz, self.clock.now_utc(), false).map(|t| fmt_utc(&t));
-            self.db
-                .set_schedule_next(flow_id, trigger_id, next.as_deref())?;
-        }
-        self.notify.notify_one();
-        Ok(())
-    }
-
     /// Reconcile `schedule_state` rows for `flow_id` against `def`.
     ///
     /// See the module docs for the survivor-preservation rule: a stored
@@ -542,13 +514,23 @@ impl Scheduler {
                 .iter()
                 .find(|(id, _)| *id == row.trigger_id)
                 .and_then(|(_, next)| next.as_deref());
+            // The definition is the single source of truth for `enabled`:
+            // sync the flag onto the row (fresh rows insert enabled=1). A
+            // survivor flipping disabled -> enabled recomputes `next_fire_at`
+            // strictly after now (like the old toggle path), so the disabled
+            // period is never replayed as a catch-up burst.
+            let re_enabling = !row.enabled && trigger.enabled;
+            if row.enabled != trigger.enabled {
+                self.db
+                    .set_schedule_enabled(flow_id, &row.trigger_id, trigger.enabled)?;
+            }
             if !pre_existing.contains(&row.trigger_id) {
-                // Fresh row: next_fire_at was set at insert; honour the
-                // definition's enabled flag (the db helper inserts enabled).
-                if !trigger.enabled {
-                    self.db
-                        .set_schedule_enabled(flow_id, &row.trigger_id, false)?;
-                }
+                // Fresh row: next_fire_at was set at insert.
+                continue;
+            }
+            if re_enabling {
+                self.db
+                    .set_schedule_next(flow_id, &row.trigger_id, computed_next)?;
                 continue;
             }
             let (cron, tz) = self.parse_trigger(flow_id, trigger)?;

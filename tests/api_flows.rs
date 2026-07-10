@@ -812,7 +812,7 @@ async fn dashboard_reports_metrics_and_next_scheduled() {
 }
 
 #[tokio::test]
-async fn schedules_list_joins_definition_and_toggle_flips_enabled() {
+async fn schedules_list_joins_definition_and_enabled_follows_definition() {
     let env = new_env();
     create_flow(&env, "cron_flow", sample_definition("Cron Flow")).await;
 
@@ -833,48 +833,35 @@ async fn schedules_list_joins_definition_and_toggle_flips_enabled() {
     assert!(row["last_fired_at"].is_null());
     assert!(row["last_run_status"].is_null());
 
-    // Toggle off, then back on.
+    // The /schedules list is read-only: enabled is owned by the flow
+    // definition. Disable the trigger by saving the flow with enabled=false.
+    let mut disabled = sample_definition("Cron Flow");
+    disabled["triggers"][0]["enabled"] = json!(false);
     let (status, _) = send(
         &env.app,
-        "POST",
-        "/api/schedules/cron_flow/daily/toggle",
-        Some(json!({ "enabled": false })),
+        "PUT",
+        "/api/flows/cron_flow",
+        Some(json!({ "definition": disabled })),
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
     let (_, body) = send(&env.app, "GET", "/api/schedules", None).await;
     assert_eq!(body[0]["enabled"], false);
 
+    // Re-enable by saving with enabled=true.
+    let mut enabled = sample_definition("Cron Flow");
+    enabled["triggers"][0]["enabled"] = json!(true);
     let (status, _) = send(
         &env.app,
-        "POST",
-        "/api/schedules/cron_flow/daily/toggle",
-        Some(json!({ "enabled": true })),
+        "PUT",
+        "/api/flows/cron_flow",
+        Some(json!({ "definition": enabled })),
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
     let (_, body) = send(&env.app, "GET", "/api/schedules", None).await;
     assert_eq!(body[0]["enabled"], true);
     assert!(body[0]["next_fire_at"].is_string());
-
-    // Unknown flow / unknown trigger both 404.
-    let (status, body) = send(
-        &env.app,
-        "POST",
-        "/api/schedules/ghost/daily/toggle",
-        Some(json!({ "enabled": true })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(body["error"].is_string());
-    let (status, _) = send(
-        &env.app,
-        "POST",
-        "/api/schedules/cron_flow/ghost/toggle",
-        Some(json!({ "enabled": true })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
