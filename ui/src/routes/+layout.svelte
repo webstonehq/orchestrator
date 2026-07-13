@@ -276,7 +276,10 @@
 	}
 
 	.brand {
-		padding: 18px 18px 14px;
+		height: 56px;
+		flex: 0 0 56px;
+		box-sizing: border-box;
+		padding: 0 18px;
 		display: flex;
 		align-items: center;
 		gap: 11px;
