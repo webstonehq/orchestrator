@@ -755,12 +755,16 @@ impl Db {
             .optional()?)
     }
 
-    /// List runs newest-first with optional flow/status filters. `page` is
-    /// 1-based. Returns the page of rows and the total matching count.
+    /// List runs newest-first with optional filters. `since`/`until` bound
+    /// `started_at` (RFC3339, half-open `[since, until)`). `page` is 1-based.
+    /// Returns the page of rows and the total matching count.
     pub fn list_runs(
         &self,
         flow: Option<&str>,
         status: Option<&str>,
+        trigger: Option<&str>,
+        since: Option<&str>,
+        until: Option<&str>,
         page: u32,
         per: u32,
     ) -> DbResult<(Vec<RunRow>, u64)> {
@@ -774,6 +778,18 @@ impl Db {
         if let Some(s) = status.as_ref() {
             where_sql.push_str(" AND status = ?");
             filters.push(s);
+        }
+        if let Some(t) = trigger.as_ref() {
+            where_sql.push_str(" AND trigger = ?");
+            filters.push(t);
+        }
+        if let Some(s) = since.as_ref() {
+            where_sql.push_str(" AND started_at >= ?");
+            filters.push(s);
+        }
+        if let Some(u) = until.as_ref() {
+            where_sql.push_str(" AND started_at < ?");
+            filters.push(u);
         }
 
         let total: i64 = conn.query_row(

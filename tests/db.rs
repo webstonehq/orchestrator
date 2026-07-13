@@ -260,32 +260,43 @@ fn list_runs_filters_paginates_and_counts() {
     set_run_status(&db, r4, "running");
     // r5 stays queued.
 
-    let (rows, total) = db.list_runs(None, None, 1, 2).unwrap();
+    let (rows, total) = db.list_runs(None, None, None, None, None, 1, 2).unwrap();
     assert_eq!(total, 5);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].id, r5, "newest first");
     assert_eq!(rows[1].id, r4);
 
-    let (rows, total) = db.list_runs(None, None, 3, 2).unwrap();
+    let (rows, total) = db.list_runs(None, None, None, None, None, 3, 2).unwrap();
     assert_eq!(total, 5);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, r1);
 
-    let (rows, total) = db.list_runs(Some("f1"), None, 1, 10).unwrap();
+    let (rows, total) = db.list_runs(Some("f1"), None, None, None, None, 1, 10).unwrap();
     assert_eq!(total, 3);
     assert_eq!(rows.len(), 3);
 
-    let (rows, total) = db.list_runs(None, Some("success"), 1, 10).unwrap();
+    let (rows, total) = db.list_runs(None, Some("success"), None, None, None, 1, 10).unwrap();
     assert_eq!(total, 2);
     assert_eq!(rows.len(), 2);
 
-    let (rows, total) = db.list_runs(Some("f1"), Some("failed"), 1, 10).unwrap();
+    let (rows, total) = db.list_runs(Some("f1"), Some("failed"), None, None, None, 1, 10).unwrap();
     assert_eq!(total, 1);
     assert_eq!(rows[0].id, r3);
 
-    let (rows, total) = db.list_runs(Some("f1"), Some("queued"), 1, 10).unwrap();
+    let (rows, total) = db.list_runs(Some("f1"), Some("queued"), None, None, None, 1, 10).unwrap();
     assert_eq!(total, 0);
     assert!(rows.is_empty());
+
+    // Trigger filter: r1/r2/r3 manual, r4 api, r5 schedule.
+    let (rows, total) = db.list_runs(None, None, Some("manual"), None, None, 1, 10).unwrap();
+    assert_eq!(total, 3);
+    assert_eq!(rows.len(), 3);
+    let (_rows, total) = db.list_runs(None, None, Some("schedule"), None, None, 1, 10).unwrap();
+    assert_eq!(total, 1);
+    // Trigger composes with flow: f2 has one api run (r4).
+    let (rows, total) = db.list_runs(Some("f2"), Some("running"), Some("api"), None, None, 1, 10).unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(rows[0].id, r4);
 
     let counts = db.count_runs_by_status().unwrap();
     assert_eq!(counts.get("success"), Some(&2));
@@ -293,6 +304,50 @@ fn list_runs_filters_paginates_and_counts() {
     assert_eq!(counts.get("running"), Some(&1));
     assert_eq!(counts.get("queued"), Some(&1));
     assert_eq!(counts.get("canceled"), None);
+}
+
+#[test]
+fn list_runs_filters_by_started_at_window() {
+    let (_dir, db) = open_temp();
+    seed_flow(&db, "f1");
+
+    let old = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    let mid = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    let recent = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    let queued = db.insert_run("f1", 1, "manual", "{}", "local", None).unwrap();
+    finish_run(&db, old, "success", "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z");
+    finish_run(&db, mid, "success", "2026-06-01T00:00:00Z", "2026-06-01T00:01:00Z");
+    finish_run(&db, recent, "success", "2026-07-10T00:00:00Z", "2026-07-10T00:01:00Z");
+    // `queued` never started, so it has no started_at.
+
+    // since only (half-open lower bound).
+    let (rows, total) = db
+        .list_runs(None, None, None, Some("2026-05-01T00:00:00Z"), None, 1, 10)
+        .unwrap();
+    assert_eq!(total, 2);
+    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![recent, mid]);
+
+    // since + until bracket a single run and exclude the started-less run.
+    let (rows, total) = db
+        .list_runs(
+            None,
+            None,
+            None,
+            Some("2026-05-01T00:00:00Z"),
+            Some("2026-07-01T00:00:00Z"),
+            1,
+            10,
+        )
+        .unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(rows[0].id, mid);
+
+    // Runs without a started_at are excluded by any lower bound.
+    let (_rows, total) = db
+        .list_runs(None, None, None, Some("2000-01-01T00:00:00Z"), None, 1, 10)
+        .unwrap();
+    assert_eq!(total, 3, "the queued run has no started_at and is filtered out");
+    let _ = queued;
 }
 
 #[test]

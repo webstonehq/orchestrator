@@ -217,6 +217,11 @@ fn non_empty(v: Option<String>) -> Option<String> {
 struct ListQuery {
     flow: Option<String>,
     status: Option<String>,
+    trigger: Option<String>,
+    /// Inclusive lower bound on `started_at` (RFC3339).
+    since: Option<String>,
+    /// Exclusive upper bound on `started_at` (RFC3339).
+    until: Option<String>,
     page: Option<u32>,
     per: Option<u32>,
 }
@@ -229,9 +234,18 @@ async fn list_runs(
     let per = q.per.unwrap_or(25).min(200);
     let flow = non_empty(q.flow);
     let status = non_empty(q.status);
-    let (rows, total) = state
-        .db
-        .list_runs(flow.as_deref(), status.as_deref(), page, per)?;
+    let trigger = non_empty(q.trigger);
+    let since = non_empty(q.since);
+    let until = non_empty(q.until);
+    let (rows, total) = state.db.list_runs(
+        flow.as_deref(),
+        status.as_deref(),
+        trigger.as_deref(),
+        since.as_deref(),
+        until.as_deref(),
+        page,
+        per,
+    )?;
 
     // Cache parsed definitions per (flow, rev) across the page.
     let mut defs: HashMap<(String, i64), Option<FlowDefinition>> = HashMap::new();

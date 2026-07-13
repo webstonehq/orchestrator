@@ -454,8 +454,17 @@ export const api = {
 	},
 
 	runs: {
-		list: (params: { flow?: string; status?: string; page?: number; per?: number } = {}) =>
-			get<RunListResponse>(`/api/runs${qs(params)}`),
+		list: (
+			params: {
+				flow?: string;
+				status?: string;
+				trigger?: string;
+				since?: string;
+				until?: string;
+				page?: number;
+				per?: number;
+			} = {}
+		) => get<RunListResponse>(`/api/runs${qs(params)}`),
 		get: (id: number, opts: { includeResult?: boolean } = {}) =>
 			get<RunDetail>(`/api/runs/${id}${qs({ include_result: opts.includeResult })}`),
 		cancel: (id: number) => post<void>(`/api/runs/${id}/cancel`),

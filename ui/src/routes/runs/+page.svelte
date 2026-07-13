@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { api, ApiError, type RunCounts, type RunListResponse } from '$lib/api';
+	import { api, ApiError, type FlowSummary, type RunCounts, type RunListResponse } from '$lib/api';
 	import { breadcrumb } from '$lib/breadcrumb';
 	import { duration, formatNumber, relativeTime } from '$lib/format';
 	import { toast } from '$lib/toast';
@@ -24,21 +24,69 @@
 		['canceled', 'Canceled']
 	];
 
+	const TRIGGERS: ReadonlyArray<readonly [string, string]> = [
+		['', 'Any trigger'],
+		['schedule', 'Schedule'],
+		['manual', 'Manual'],
+		['api', 'API']
+	];
+
+	// Preset windows on `started_at`, keyed by rough millisecond span.
+	const RANGES: ReadonlyArray<readonly [string, string]> = [
+		['', 'Any time'],
+		['24h', 'Last 24h'],
+		['7d', 'Last 7 days'],
+		['30d', 'Last 30 days']
+	];
+	const RANGE_MS: Record<string, number> = {
+		'24h': 24 * 60 * 60 * 1000,
+		'7d': 7 * 24 * 60 * 60 * 1000,
+		'30d': 30 * 24 * 60 * 60 * 1000
+	};
+
 	let statusFilter: keyof RunCounts = $state('all');
+	let triggerFilter = $state('');
+	let timeRange = $state('');
 	let pageNum = $state(1);
 	let data: RunListResponse | null = $state(null);
 	let loadError: string | null = $state(null);
 	let retryNonce = $state(0);
+	let flows: FlowSummary[] = $state([]);
 
 	// ?flow=<id> arrives as a normal search param (e.g. /runs?flow=x) and is
 	// reactive via page.url.
 	const flowFilter = $derived(page.url.searchParams.get('flow'));
 
-	// Reset to page 1 whenever the flow filter changes via navigation.
+	const hasFilter = $derived(
+		statusFilter !== 'all' || triggerFilter !== '' || timeRange !== '' || flowFilter !== null
+	);
+
+	// Load the flow list once to populate the flow picker. Failures leave the
+	// picker with just "All flows" — filtering still works via the other chips.
+	$effect(() => {
+		api.flows
+			.list()
+			.then((f) => (flows = f))
+			.catch(() => {});
+	});
+
+	// Reset to page 1 whenever a filter changes (flow arrives via navigation).
 	$effect(() => {
 		void flowFilter;
+		void triggerFilter;
+		void timeRange;
 		pageNum = 1;
 	});
+
+	// Inclusive lower bound on started_at for the selected preset window.
+	function rangeSince(range: string): string | undefined {
+		const span = RANGE_MS[range];
+		return span ? new Date(Date.now() - span).toISOString() : undefined;
+	}
+
+	function selectFlow(id: string) {
+		void goto(id ? `/runs?flow=${encodeURIComponent(id)}` : '/runs');
+	}
 
 	// Fetch + poll. Poll fast (3s) while any run on the current page is
 	// running/queued, otherwise slow (10s). Restarts whenever a filter,
@@ -47,6 +95,8 @@
 		const params = {
 			flow: flowFilter ?? undefined,
 			status: statusFilter === 'all' ? undefined : statusFilter,
+			trigger: triggerFilter || undefined,
+			since: rangeSince(timeRange),
 			page: pageNum,
 			per: PER
 		};
@@ -86,10 +136,6 @@
 		pageNum = 1;
 	}
 
-	function clearFlowFilter() {
-		void goto('/runs');
-	}
-
 	function triggerColor(trigger: string): string {
 		if (trigger.startsWith('schedule')) return 'var(--accent)';
 		if (trigger.startsWith('api')) return 'var(--cyan)';
@@ -119,17 +165,35 @@
 				</span>
 			</button>
 		{/each}
-		{#if flowFilter}
-			<button
-				class="chip flow-chip"
-				title="Clear flow filter"
-				aria-label="Clear flow filter {flowFilter}"
-				onclick={clearFlowFilter}
-			>
-				flow: {flowFilter}
-				<span class="flow-chip-x" aria-hidden="true">×</span>
-			</button>
-		{/if}
+	</div>
+
+	<div class="filters">
+		<select
+			class="filter-select"
+			aria-label="Filter by flow"
+			value={flowFilter ?? ''}
+			onchange={(e) => selectFlow(e.currentTarget.value)}
+		>
+			<option value="">All flows</option>
+			{#each flows as f (f.id)}
+				<option value={f.id}>{f.name || f.id}</option>
+			{/each}
+			{#if flowFilter && !flows.some((f) => f.id === flowFilter)}
+				<option value={flowFilter}>{flowFilter}</option>
+			{/if}
+		</select>
+
+		<select class="filter-select" aria-label="Filter by trigger" bind:value={triggerFilter}>
+			{#each TRIGGERS as [value, label] (value)}
+				<option {value}>{label}</option>
+			{/each}
+		</select>
+
+		<select class="filter-select" aria-label="Filter by time" bind:value={timeRange}>
+			{#each RANGES as [value, label] (value)}
+				<option {value}>{label}</option>
+			{/each}
+		</select>
 	</div>
 
 	{#if data === null && loadError !== null}
@@ -173,8 +237,8 @@
 				<div class="table-empty">
 					<EmptyState
 						title="No runs found"
-						hint={statusFilter !== 'all' || flowFilter
-							? 'No runs match the current filter.'
+						hint={hasFilter
+							? 'No runs match the current filters.'
 							: 'Trigger a flow to see its runs here.'}
 					/>
 				</div>
@@ -266,21 +330,32 @@
 		color: var(--accent);
 	}
 
-	.flow-chip {
-		color: var(--cyan);
-		border-color: rgba(88, 166, 255, 0.32);
-		background: rgba(88, 166, 255, 0.08);
+	.filters {
+		display: flex;
+		gap: 8px;
+		margin-bottom: 16px;
+		flex-wrap: wrap;
 	}
 
-	.flow-chip:hover {
-		color: var(--cyan);
-		background: rgba(88, 166, 255, 0.14);
+	.filter-select {
+		height: 32px;
+		padding: 0 10px;
+		border-radius: 8px;
+		border: 1px solid var(--border);
+		background: var(--bg2);
+		color: var(--text);
+		font: 500 12px 'IBM Plex Mono', monospace;
+		cursor: pointer;
+		outline: none;
+		max-width: 220px;
 	}
 
-	.flow-chip-x {
-		font-size: 14px;
-		line-height: 1;
-		color: var(--muted);
+	.filter-select:hover {
+		border-color: var(--border2);
+	}
+
+	.filter-select:focus {
+		border-color: var(--accent);
 	}
 
 	/* Columns + row height for the shared .table-grid scaffold (theme.css). */
